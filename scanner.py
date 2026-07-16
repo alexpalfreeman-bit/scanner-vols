@@ -304,6 +304,20 @@ def formater_alerte(route: dict, vol: dict, raisons: list[str], stats: dict | No
 # ---------------------------------------------------------------- main
 
 
+def ecrire_resume_github(resultats: list[tuple[str, str]]) -> None:
+    """Ajoute un resume Markdown a $GITHUB_STEP_SUMMARY si present (no-op en local)."""
+    chemin = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not chemin:
+        return
+    lignes = ["## Résumé du scan", "", "| Route | Résultat |", "|---|---|"]
+    lignes += [f"| {route} | {resultat} |" for route, resultat in resultats]
+    try:
+        with open(chemin, "a", encoding="utf-8") as f:
+            f.write("\n".join(lignes) + "\n")
+    except OSError:
+        pass
+
+
 def main() -> int:
     config = charger_config()
     session = creer_session_duffel()
@@ -311,20 +325,21 @@ def main() -> int:
     detection_cfg = config.get("detection", {})
     maintenant = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
 
-    erreurs = 0
+    resultats: list[tuple[str, str]] = []
     for route in generer_candidats(config):
         nom_route = f"{route['origine']}→{route['destination']} ({route['date_depart']})"
         try:
             vol = chercher_meilleur_vol(session, route, config)
         except Exception as e:
             print(f"[ERREUR API] {nom_route} : {e}", file=sys.stderr)
-            erreurs += 1
+            resultats.append((nom_route, f"ERREUR API : {e}"))
             continue
         finally:
             time.sleep(0.25)
 
         if vol is None:
             print(f"[AUCUN VOL] {nom_route}")
+            resultats.append((nom_route, "aucun vol trouvé"))
             continue
 
         stats = statistiques_destination(historique, route["origine"], route["destination"], config)
@@ -364,14 +379,19 @@ def main() -> int:
             try:
                 envoyer_telegram(message)
                 print(f"[ALERTE ENVOYÉE] {nom_route} : {vol['prix']} {vol['devise']}")
+                resultats.append((nom_route, f"alerte envoyée : {vol['prix']} {vol['devise']}"))
             except Exception as e:
                 print(f"[ERREUR TELEGRAM] {nom_route} : {e}", file=sys.stderr)
-                erreurs += 1
+                resultats.append((nom_route, f"ERREUR TELEGRAM : {e}"))
         else:
             mediane = f"{stats['mediane']:.0f}" if stats else "?"
             print(f"[OK] {nom_route} : {vol['prix']} {vol['devise']} (médiane : {mediane})")
+            resultats.append((nom_route, f"ok : {vol['prix']} {vol['devise']}"))
 
-    return 1 if erreurs else 0
+    ecrire_resume_github(resultats)
+    total = len(resultats)
+    echecs = sum(1 for _, r in resultats if r.startswith("ERREUR"))
+    return 1 if total and echecs == total else 0
 
 
 if __name__ == "__main__":

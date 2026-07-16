@@ -11,9 +11,14 @@ on:
 permissions:
   contents: write         # nécessaire pour committer l'historique des prix
 
+concurrency:
+  group: scan-vols
+  cancel-in-progress: false
+
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Récupérer le code
         uses: actions/checkout@v4
@@ -39,5 +44,11 @@ jobs:
           git config user.name "scanner-bot"
           git config user.email "scanner-bot@users.noreply.github.com"
           git add data/history.csv
-          git diff --cached --quiet || (git commit -m "MAJ prix $(date -u +'%Y-%m-%d %H:%M')" && git push)
+          if git diff --cached --quiet; then
+            echo "Rien de nouveau à committer."
+            exit 0
+          fi
+          git commit -m "MAJ prix $(date -u +'%Y-%m-%d %H:%M:%S')"
+          git pull --rebase origin master
+          git push
 
