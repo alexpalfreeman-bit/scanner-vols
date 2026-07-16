@@ -40,3 +40,4 @@ jobs:
           git config user.email "scanner-bot@users.noreply.github.com"
           git add data/history.csv
           git diff --cached --quiet || (git commit -m "MAJ prix $(date -u +'%Y-%m-%d %H:%M')" && git push)
+
