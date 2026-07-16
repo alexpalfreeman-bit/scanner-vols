@@ -30,10 +30,10 @@ Comme il n'y a pas d'historique au départ, la détection statistique démarre "
 
 ## Étape 3 — Test en local (15 min)
 
-Prérequis : Python 3.11+.
+Prérequis : Python 3.12+.
 
 ```bash
-pip install -r requirements.txt
+pip install -e ".[dev]"
 cp .env.example .env      # Windows : copy .env.example .env
 ```
 

@@ -23,8 +23,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Installer les dépendances
-        run: pip install -r requirements.txt
+      - name: Installer le projet
+        run: pip install .
 
       - name: Lancer le scanner
         env:

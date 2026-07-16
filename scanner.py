@@ -25,12 +25,14 @@ et fait planter silencieusement le parsing des offres).
 """
 
 import csv
+import io
 import os
 import statistics
 import sys
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import requests
 import yaml
@@ -39,9 +41,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Force stdout/stderr en UTF-8 : sur Windows, la console utilise par defaut
-# un codepage (ex. cp1252) qui plante sur les caracteres comme "->".
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+# un codepage (ex. cp1252) qui plante sur les caracteres comme "->". Le
+# isinstance() garde le typage correct (TextIO n'a pas reconfigure()) et
+# protege le cas rare ou stdout/stderr aurait deja ete remplace ailleurs.
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if isinstance(sys.stderr, io.TextIOWrapper):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 DUFFEL_API_URL = "https://api.duffel.com"
 DUFFEL_VERSION = "v2"
@@ -51,32 +57,42 @@ CONFIG_FILE = BASE_DIR / "config.yaml"
 HISTORY_FILE = BASE_DIR / "data" / "history.csv"
 
 COLONNES = [
-    "horodatage_utc", "origine", "destination",
-    "date_depart", "date_retour", "prix", "devise",
-    "compagnie", "escales",
+    "horodatage_utc",
+    "origine",
+    "destination",
+    "date_depart",
+    "date_retour",
+    "prix",
+    "devise",
+    "compagnie",
+    "escales",
 ]
 
 
 # ---------------------------------------------------------------- config
 
+
 def charger_config() -> dict:
     with open(CONFIG_FILE, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return cast(dict, yaml.safe_load(f))
 
 
 def creer_session_duffel() -> requests.Session:
     token = os.environ["DUFFEL_ACCESS_TOKEN"]
     session = requests.Session()
-    session.headers.update({
-        "Authorization": f"Bearer {token}",
-        "Duffel-Version": DUFFEL_VERSION,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    })
+    session.headers.update(
+        {
+            "Authorization": f"Bearer {token}",
+            "Duffel-Version": DUFFEL_VERSION,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+    )
     return session
 
 
 # ---------------------------------------------------------------- candidats
+
 
 def choisir_offset_semaines(code: str, offsets: list[int], jour: date) -> int:
     """Choisit un decalage (en semaines) dans `offsets`, de facon deterministe
@@ -102,33 +118,40 @@ def generer_candidats(config: dict) -> list[dict]:
         decalage = choisir_offset_semaines(code, offsets, aujourdhui)
         depart = aujourdhui + timedelta(weeks=decalage)
         retour = depart + timedelta(days=duree_nuits)
-        candidats.append({
-            "origine": origine,
-            "destination": code,
-            "date_depart": depart.isoformat(),
-            "date_retour": retour.isoformat(),
-            "prix_max": dest.get("prix_max"),
-            "direct_seulement": dest.get("direct_seulement", False),
-        })
+        candidats.append(
+            {
+                "origine": origine,
+                "destination": code,
+                "date_depart": depart.isoformat(),
+                "date_retour": retour.isoformat(),
+                "prix_max": dest.get("prix_max"),
+                "direct_seulement": dest.get("direct_seulement", False),
+            }
+        )
     return candidats
 
 
 # ---------------------------------------------------------------- recherche
 
+
 def chercher_meilleur_vol(session: requests.Session, route: dict, config: dict) -> dict | None:
     """Retourne l'offre la moins chere pour la route, ou None si rien trouve."""
     # Une "slice" = un trajet (aller). Un aller-retour = deux slices.
-    slices = [{
-        "origin": route["origine"],
-        "destination": route["destination"],
-        "departure_date": str(route["date_depart"]),
-    }]
+    slices = [
+        {
+            "origin": route["origine"],
+            "destination": route["destination"],
+            "departure_date": str(route["date_depart"]),
+        }
+    ]
     if route.get("date_retour"):
-        slices.append({
-            "origin": route["destination"],
-            "destination": route["origine"],
-            "departure_date": str(route["date_retour"]),
-        })
+        slices.append(
+            {
+                "origin": route["destination"],
+                "destination": route["origine"],
+                "departure_date": str(route["date_retour"]),
+            }
+        )
 
     passengers = [{"type": "adult"} for _ in range(config.get("adultes", 1))]
 
@@ -162,8 +185,9 @@ def chercher_meilleur_vol(session: requests.Session, route: dict, config: dict) 
         escales = max(escales, len(sl["segments"]) - 1)
     # Nom complet de la compagnie operante du premier segment (exige par la reglementation US)
     premier_segment = meilleure["slices"][0]["segments"][0]
-    compagnie = (premier_segment.get("operating_carrier") or {}).get("name") \
-        or (premier_segment.get("marketing_carrier") or {}).get("name", "?")
+    compagnie = (premier_segment.get("operating_carrier") or {}).get("name") or (
+        premier_segment.get("marketing_carrier") or {}
+    ).get("name", "?")
 
     return {
         "prix": round(float(meilleure["total_amount"]), 2),
@@ -175,6 +199,7 @@ def chercher_meilleur_vol(session: requests.Session, route: dict, config: dict) 
 
 # ---------------------------------------------------------------- historique
 
+
 def lire_historique() -> list[dict]:
     if not HISTORY_FILE.exists():
         return []
@@ -182,15 +207,21 @@ def lire_historique() -> list[dict]:
         return list(csv.DictReader(f))
 
 
-def statistiques_destination(historique: list[dict], origine: str, destination: str, config: dict) -> dict | None:
+def statistiques_destination(
+    historique: list[dict], origine: str, destination: str, config: dict
+) -> dict | None:
     """Statistiques de la destination (toutes dates confondues, puisque la
     date candidate change a chaque run) : minimum, mediane, et tendance
     recente vs ancienne. Retourne None sans aucune observation prealable."""
     lignes = sorted(
-        (l for l in historique if l["origine"] == origine and l["destination"] == destination),
-        key=lambda l: l["horodatage_utc"],
+        (
+            ligne
+            for ligne in historique
+            if ligne["origine"] == origine and ligne["destination"] == destination
+        ),
+        key=lambda ligne: ligne["horodatage_utc"],
     )
-    prix = [float(l["prix"]) for l in lignes]
+    prix = [float(ligne["prix"]) for ligne in lignes]
     if not prix:
         return None
 
@@ -199,7 +230,7 @@ def statistiques_destination(historique: list[dict], origine: str, destination: 
     seuil_variation = cfg.get("variation_tendance_pct", 0.05)
 
     recents = prix[-fenetre:]
-    anciens = prix[-(fenetre * 2):-fenetre]
+    anciens = prix[-(fenetre * 2) : -fenetre]
 
     tendance, variation = None, None
     if len(recents) >= 2 and len(anciens) >= 2:
@@ -232,6 +263,7 @@ def ajouter_historique(ligne: dict) -> None:
 
 
 # ---------------------------------------------------------------- alertes
+
 
 def envoyer_telegram(message: str) -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -271,12 +303,13 @@ def formater_alerte(route: dict, vol: dict, raisons: list[str], stats: dict | No
 
 # ---------------------------------------------------------------- main
 
+
 def main() -> int:
     config = charger_config()
     session = creer_session_duffel()
     historique = lire_historique()
     detection_cfg = config.get("detection", {})
-    maintenant = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    maintenant = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
 
     erreurs = 0
     for route in generer_candidats(config):
@@ -296,17 +329,19 @@ def main() -> int:
 
         stats = statistiques_destination(historique, route["origine"], route["destination"], config)
 
-        ajouter_historique({
-            "horodatage_utc": maintenant,
-            "origine": route["origine"],
-            "destination": route["destination"],
-            "date_depart": route["date_depart"],
-            "date_retour": route.get("date_retour", ""),
-            "prix": vol["prix"],
-            "devise": vol["devise"],
-            "compagnie": vol["compagnie"],
-            "escales": vol["escales"],
-        })
+        ajouter_historique(
+            {
+                "horodatage_utc": maintenant,
+                "origine": route["origine"],
+                "destination": route["destination"],
+                "date_depart": route["date_depart"],
+                "date_retour": route.get("date_retour", ""),
+                "prix": vol["prix"],
+                "devise": vol["devise"],
+                "compagnie": vol["compagnie"],
+                "escales": vol["escales"],
+            }
+        )
 
         raisons = []
         if route.get("prix_max") is not None and vol["prix"] <= route["prix_max"]:
@@ -320,7 +355,9 @@ def main() -> int:
                 baisse_pct = 1 - vol["prix"] / stats["mediane"]
                 seuil_erreur = detection_cfg.get("seuil_erreur_prix_pct", 0.40)
                 label = "possible erreur de prix" if baisse_pct >= seuil_erreur else "bonne affaire"
-                raisons.append(f"{label} : {baisse_pct:.0%} sous la médiane ({stats['mediane']:.0f} {vol['devise']})")
+                raisons.append(
+                    f"{label} : {baisse_pct:.0%} sous la médiane ({stats['mediane']:.0f} {vol['devise']})"
+                )
 
         if raisons:
             message = formater_alerte(route, vol, raisons, stats)
