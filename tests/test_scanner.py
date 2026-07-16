@@ -31,9 +31,12 @@ def test_ecrire_resume_github_noop_sans_variable_environnement(monkeypatch) -> N
 
 
 def _config_minimal(nb_destinations: int) -> dict:
+    """Config minimale mais valide vis-à-vis de config.valider_config (codes
+    IATA à 3 lettres, devise présente) : main() valide réellement charger_config()."""
     return {
         "origine": "YUL",
-        "destinations": [{"code": f"D{i}"} for i in range(nb_destinations)],
+        "devise": "USD",
+        "destinations": [{"code": chr(65 + i) * 3} for i in range(nb_destinations)],
     }
 
 
@@ -49,7 +52,9 @@ def _vol_sans_alerte() -> dict:
 @patch("scanner.lire_historique", return_value=[])
 @patch("scanner.creer_session_duffel")
 @patch("scanner.charger_config")
+@patch("scanner.charger_env")
 def test_main_reussit_si_au_moins_une_route_reussit(
+    charger_env_mock,
     charger_config_mock,
     creer_session_mock,
     lire_historique_mock,
@@ -77,7 +82,9 @@ def test_main_reussit_si_au_moins_une_route_reussit(
 @patch("scanner.lire_historique", return_value=[])
 @patch("scanner.creer_session_duffel")
 @patch("scanner.charger_config")
+@patch("scanner.charger_env")
 def test_main_echoue_si_toutes_les_routes_echouent(
+    charger_env_mock,
     charger_config_mock,
     creer_session_mock,
     lire_historique_mock,

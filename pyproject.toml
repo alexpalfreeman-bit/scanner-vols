@@ -27,8 +27,7 @@ dev = [
 ]
 
 [tool.setuptools]
-# "config" sera ajouté ici en 1.8 (n'existe pas encore à ce stade de l'audit)
-py-modules = ["scanner"]
+py-modules = ["scanner", "config"]
 packages = []
 
 [tool.ruff]
@@ -43,9 +42,9 @@ ignore = ["E501"]  # longueur de ligne déléguée à ruff format
 quote-style = "double"
 
 [tool.mypy]
+plugins = ["pydantic.mypy"]
 python_version = "3.12"
-# "config.py" sera ajouté ici en 1.8 (n'existe pas encore à ce stade de l'audit)
-files = ["scanner.py"]
+files = ["scanner.py", "config.py"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 check_untyped_defs = true

@@ -36,9 +36,8 @@ from typing import cast
 
 import requests
 import yaml
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import Env, ErreurConfiguration, charger_env, valider_config
 
 # Force stdout/stderr en UTF-8 : sur Windows, la console utilise par defaut
 # un codepage (ex. cp1252) qui plante sur les caracteres comme "->". Le
@@ -77,12 +76,11 @@ def charger_config() -> dict:
         return cast(dict, yaml.safe_load(f))
 
 
-def creer_session_duffel() -> requests.Session:
-    token = os.environ["DUFFEL_ACCESS_TOKEN"]
+def creer_session_duffel(env: Env) -> requests.Session:
     session = requests.Session()
     session.headers.update(
         {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {env.duffel_access_token}",
             "Duffel-Version": DUFFEL_VERSION,
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -265,13 +263,11 @@ def ajouter_historique(ligne: dict) -> None:
 # ---------------------------------------------------------------- alertes
 
 
-def envoyer_telegram(message: str) -> None:
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+def envoyer_telegram(message: str, env: Env) -> None:
+    url = f"https://api.telegram.org/bot{env.telegram_bot_token}/sendMessage"
     r = requests.post(
         url,
-        data={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
+        data={"chat_id": env.telegram_chat_id, "text": message, "parse_mode": "HTML"},
         timeout=15,
     )
     r.raise_for_status()
@@ -319,8 +315,14 @@ def ecrire_resume_github(resultats: list[tuple[str, str]]) -> None:
 
 
 def main() -> int:
-    config = charger_config()
-    session = creer_session_duffel()
+    try:
+        env = charger_env()
+        config = valider_config(charger_config())
+    except ErreurConfiguration as e:
+        print(f"[ERREUR CONFIGURATION] {e}", file=sys.stderr)
+        return 1
+
+    session = creer_session_duffel(env)
     historique = lire_historique()
     detection_cfg = config.get("detection", {})
     maintenant = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
@@ -377,7 +379,7 @@ def main() -> int:
         if raisons:
             message = formater_alerte(route, vol, raisons, stats)
             try:
-                envoyer_telegram(message)
+                envoyer_telegram(message, env)
                 print(f"[ALERTE ENVOYÉE] {nom_route} : {vol['prix']} {vol['devise']}")
                 resultats.append((nom_route, f"alerte envoyée : {vol['prix']} {vol['devise']}"))
             except Exception as e:
