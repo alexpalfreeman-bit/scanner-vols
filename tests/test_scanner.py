@@ -27,6 +27,45 @@ def test_ecrire_resume_github_noop_sans_variable_environnement(monkeypatch) -> N
     scanner.ecrire_resume_github([("x", "y")])  # ne doit pas lever
 
 
+# ---------------------------------------------------------------- devise (1.1)
+
+
+def _ligne_historique(devise: str, prix: float, horodatage: str) -> dict:
+    return {
+        "horodatage_utc": horodatage,
+        "origine": "YUL",
+        "destination": "CDG",
+        "prix": prix,
+        "devise": devise,
+    }
+
+
+def test_statistiques_destination_filtre_par_devise() -> None:
+    historique = [
+        _ligne_historique("CAD", 700, "2026-01-01T00:00:00+00:00"),
+        _ligne_historique("USD", 500, "2026-01-02T00:00:00+00:00"),
+        _ligne_historique("USD", 510, "2026-01-03T00:00:00+00:00"),
+    ]
+
+    stats = scanner.statistiques_destination(historique, "YUL", "CDG", "USD", {})
+
+    assert stats is not None
+    assert stats["n"] == 2
+    assert stats["min"] == 500
+
+
+def test_raison_prix_max_meme_devise_sous_seuil() -> None:
+    assert scanner.raison_prix_max(400, "CAD", 500, "CAD") == "sous ton seuil fixe de 500 CAD"
+
+
+def test_raison_prix_max_devise_differente_retourne_none() -> None:
+    assert scanner.raison_prix_max(400, "USD", 500, "CAD") is None
+
+
+def test_raison_prix_max_aucun_seuil_configure_retourne_none() -> None:
+    assert scanner.raison_prix_max(400, "CAD", None, "CAD") is None
+
+
 # ---------------------------------------------------------------- main() : politique de sortie
 
 

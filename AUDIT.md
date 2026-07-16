@@ -14,16 +14,16 @@
 
 ## Phase 0 — Fondations de l'outillage
 
-- [ ] Créer la branche `refactor-audit` depuis `main`.
-- [ ] Créer `pyproject.toml` : métadonnées du projet, `requires-python = ">=3.12"`,
+- [x] Créer la branche `refactor-audit` depuis `main`.
+- [x] Créer `pyproject.toml` : métadonnées du projet, `requires-python = ">=3.12"`,
       dépendances épinglées aux dernières versions stables (requests, PyYAML,
       python-dotenv, pydantic, pydantic-settings) et extra `[dev]`
       (pytest, ruff, mypy, pre-commit, types-requests, types-PyYAML).
       Supprimer `requirements.txt` une fois l'équivalence vérifiée.
-- [ ] Configurer `ruff` (lint + format) et `mypy` dans `pyproject.toml`.
-- [ ] Ajouter `.pre-commit-config.yaml` : ruff, ruff-format, gitleaks (anti-secrets).
-- [ ] Créer `.github/workflows/ci.yml` : sur push/PR → ruff → mypy → pytest.
-- [ ] Durcir `.github/workflows/scan.yml` :
+- [x] Configurer `ruff` (lint + format) et `mypy` dans `pyproject.toml`.
+- [x] Ajouter `.pre-commit-config.yaml` : ruff, ruff-format, gitleaks (anti-secrets).
+- [x] Créer `.github/workflows/ci.yml` : sur push/PR → ruff → mypy → pytest.
+- [x] Durcir `.github/workflows/scan.yml` :
       - bloc `concurrency:` (groupe unique, `cancel-in-progress: false`) ;
       - `timeout-minutes: 15` sur le job ;
       - `git pull --rebase` avant le `git push` de l'historique ;
@@ -37,7 +37,7 @@
 
 ## Phase 1 — Corrections de bugs (chaque fix = au moins 1 test)
 
-### 1.1 Bug devise (CRITIQUE)
+### 1.1 Bug devise (CRITIQUE) ✅
 **Problème** : `config.yaml` déclare `devise: CAD` mais la clé n'est jamais lue.
 Duffel renvoie la devise du compte (USD dans l'historique actuel). Conséquences :
 `prix_max` (pensé en CAD) est comparé à des montants USD, et
@@ -112,7 +112,7 @@ def post_resilient(session: requests.Session, url: str, corps: dict,
 Logger structuré (module standard `logging`) : niveau INFO pour le déroulé,
 WARNING/ERROR pour les anomalies. Sortie lisible dans GitHub Actions.
 
-### 1.8 Validation de la configuration au démarrage
+### 1.8 Validation de la configuration au démarrage ✅
 `os.environ["X"]` crashe en `KeyError` cryptique. Introduire `config.py` avec
 `pydantic-settings` : les 3 variables d'env requises + le chargement/validation
 de `config.yaml` (codes IATA à 3 lettres, seuils dans ]0,1[, etc.).

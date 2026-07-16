@@ -206,16 +206,21 @@ def lire_historique() -> list[dict]:
 
 
 def statistiques_destination(
-    historique: list[dict], origine: str, destination: str, config: dict
+    historique: list[dict], origine: str, destination: str, devise: str, config: dict
 ) -> dict | None:
     """Statistiques de la destination (toutes dates confondues, puisque la
     date candidate change a chaque run) : minimum, mediane, et tendance
-    recente vs ancienne. Retourne None sans aucune observation prealable."""
+    recente vs ancienne. Filtre aussi par devise : un historique qui
+    melangerait USD et CAD (ex. apres un changement de compte Duffel)
+    ne doit jamais comparer des montants de devises differentes.
+    Retourne None sans aucune observation prealable (dans cette devise)."""
     lignes = sorted(
         (
             ligne
             for ligne in historique
-            if ligne["origine"] == origine and ligne["destination"] == destination
+            if ligne["origine"] == origine
+            and ligne["destination"] == destination
+            and ligne["devise"] == devise
         ),
         key=lambda ligne: ligne["horodatage_utc"],
     )
@@ -271,6 +276,20 @@ def envoyer_telegram(message: str, env: Env) -> None:
         timeout=15,
     )
     r.raise_for_status()
+
+
+def raison_prix_max(
+    prix: float, devise: str, prix_max: float | None, devise_attendue: str
+) -> str | None:
+    """Compare prix/devise au seuil fixe prix_max, qui est exprime dans
+    devise_attendue (config['devise']). Retourne None si aucun seuil n'est
+    configure, ou si la devise de l'offre ne correspond pas (mieux vaut
+    ignorer la comparaison que comparer des devises differentes en silence)."""
+    if prix_max is None or devise != devise_attendue:
+        return None
+    if prix <= prix_max:
+        return f"sous ton seuil fixe de {prix_max} {devise}"
+    return None
 
 
 def formater_alerte(route: dict, vol: dict, raisons: list[str], stats: dict | None) -> str:
@@ -344,7 +363,9 @@ def main() -> int:
             resultats.append((nom_route, "aucun vol trouvé"))
             continue
 
-        stats = statistiques_destination(historique, route["origine"], route["destination"], config)
+        stats = statistiques_destination(
+            historique, route["origine"], route["destination"], vol["devise"], config
+        )
 
         ajouter_historique(
             {
@@ -361,8 +382,17 @@ def main() -> int:
         )
 
         raisons = []
-        if route.get("prix_max") is not None and vol["prix"] <= route["prix_max"]:
-            raisons.append(f"sous ton seuil fixe de {route['prix_max']} {vol['devise']}")
+        if route.get("prix_max") is not None and vol["devise"] != config["devise"]:
+            print(
+                f"[AVERTISSEMENT] {nom_route} : prix_max ignoré (configuré en "
+                f"{config['devise']}, offre en {vol['devise']})",
+                file=sys.stderr,
+            )
+        raison_seuil = raison_prix_max(
+            vol["prix"], vol["devise"], route.get("prix_max"), config["devise"]
+        )
+        if raison_seuil:
+            raisons.append(raison_seuil)
         if stats and vol["prix"] < stats["min"]:
             raisons.append(f"nouveau minimum historique (précédent {stats['min']} {vol['devise']})")
         if stats and stats["n"] >= detection_cfg.get("echantillon_min", 5):

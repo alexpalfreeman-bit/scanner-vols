@@ -10,6 +10,8 @@ Le prix trouvé est enregistré dans `data/history.csv`, puis comparé à l'hist
 
 Comme il n'y a pas d'historique au départ, la détection statistique démarre "à froid" (elle ne se déclenche qu'après `detection.echantillon_min` observations pour une destination) mais s'améliore ensuite automatiquement à mesure que `data/history.csv` grossit.
 
+**Devise :** `config.yaml` déclare une `devise` (ex. `CAD`), mais Duffel renvoie toujours le prix dans la devise propre de l'offre — qui dépend du compte (souvent USD en sandbox), pas d'un paramètre qu'on peut forcer. Le scanner ne compare donc jamais deux prix de devises différentes : l'historique d'une destination est filtré par devise, et un seuil fixe (`prix_max`) n'est pris en compte que si l'offre est bien dans la devise déclarée — sinon un avertissement est loggé et cette observation est ignorée pour ce seuil précis (elle reste dans l'historique).
+
 ---
 
 ## Étape 1 — Compte Duffel (5 min)
