@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------
+# Configuration du scanner de vols
+# Origine unique + liste mondiale de destinations : c'est le prix
+# qui te dit où et quand partir, pas l'inverse.
+# Codes IATA : YUL = Montréal, CDG = Paris, NRT = Tokyo, etc.
+# ---------------------------------------------------------------
+
+origine: YUL
+devise: CAD
+adultes: 1
+classe: economy   # economy, premium_economy, business, first
+
+sejour:
+  duree_nuits: 12                            # longueur du séjour (nuits)
+  candidats_semaines: [13, 16, 19, 22, 25]   # décalages en semaines testés en rotation (~3 à ~6 mois à l'avance)
+
+detection:
+  seuil_bonne_affaire_pct: 0.15   # alerte si prix <= 85% de la médiane historique de la destination
+  seuil_erreur_prix_pct: 0.40     # au-delà de cette baisse, le message dit "possible erreur de prix"
+  echantillon_min: 5              # nb min. d'observations avant de faire confiance à la médiane
+  fenetre_tendance: 5             # nb d'observations récentes vs anciennes comparées pour la tendance
+  variation_tendance_pct: 0.05    # +/-5% = seuil pour déclarer hausse/baisse vs stable
+
+# Chaque destination : juste un code IATA, ou un objet avec prix_max /
+# direct_seulement en plus si tu veux un seuil fixe ou exiger un vol direct.
+destinations:
+  # --- Europe ---
+  - code: CDG   # Paris
+  - code: LHR   # Londres
+  - code: FCO   # Rome
+  - code: MAD   # Madrid
+    prix_max: 900
+  - code: AMS   # Amsterdam
+  - code: BCN   # Barcelone
+  - code: LIS   # Lisbonne
+  - code: ATH   # Athènes
+  - code: CPH   # Copenhague
+  - code: FRA   # Francfort
+
+  # --- Amériques (hors Canada) ---
+  - code: CUN   # Cancún
+    prix_max: 450
+    direct_seulement: true
+  - code: MEX   # Mexico
+  - code: LIM   # Lima
+  - code: BOG   # Bogotá
+  - code: GIG   # Rio de Janeiro
+  - code: PUJ   # Punta Cana
+  - code: HAV   # La Havane
+  - code: NAS   # Nassau
+  - code: JFK   # New York
+  - code: LAX   # Los Angeles
+  - code: MIA   # Miami
+
+  # --- Asie / Moyen-Orient ---
+  - code: NRT   # Tokyo
+  - code: ICN   # Séoul
+  - code: BKK   # Bangkok
+  - code: SIN   # Singapour
+  - code: HKG   # Hong Kong
+  - code: DEL   # Delhi
+  - code: DXB   # Dubaï
+  - code: PEK   # Pékin
+
+  # --- Afrique ---
+  - code: CAI   # Le Caire
+  - code: CMN   # Casablanca
+  - code: NBO   # Nairobi
+  - code: CPT   # Le Cap
+  - code: JNB   # Johannesburg
+
+  # --- Océanie ---
+  - code: SYD   # Sydney
+  - code: AKL   # Auckland
+  - code: NAN   # Fidji

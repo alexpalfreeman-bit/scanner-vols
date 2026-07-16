@@ -1,0 +1,42 @@
+name: Scan des prix de vols
+
+on:
+  schedule:
+    # Une fois par jour (minute 17 pour éviter les pics de charge GitHub).
+    # 35 destinations x 1x/jour ~= 2$/mois après le quota gratuit Duffel.
+    # Pour réduire encore le coût : "17 6 */2 * *" (un jour sur deux).
+    - cron: "17 6 * * *"
+  workflow_dispatch: {}   # permet de lancer manuellement depuis l'onglet Actions
+
+permissions:
+  contents: write         # nécessaire pour committer l'historique des prix
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dépendances
+        run: pip install -r requirements.txt
+
+      - name: Lancer le scanner
+        env:
+          DUFFEL_ACCESS_TOKEN: ${{ secrets.DUFFEL_ACCESS_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scanner.py
+
+      - name: Sauvegarder l'historique des prix
+        if: always()
+        run: |
+          git config user.name "scanner-bot"
+          git config user.email "scanner-bot@users.noreply.github.com"
+          git add data/history.csv
+          git diff --cached --quiet || (git commit -m "MAJ prix $(date -u +'%Y-%m-%d %H:%M')" && git push)
