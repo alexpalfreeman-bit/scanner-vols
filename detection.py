@@ -20,7 +20,7 @@ import calendar
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Literal
 
 
@@ -232,3 +232,99 @@ def classifier(
     if z <= seuil_affaire_z:
         return "bonne_affaire"
     return "normal"
+
+
+# ---------------------------------------------------------------- corroboration erreur_prix (2.3.c)
+
+
+@dataclass(frozen=True)
+class SignauxCorroboration:
+    """Signaux deja mesures ailleurs (aucun appel reseau ici - voir le
+    docstring du module) pour corroborer un candidat erreur_prix. Un champ
+    absent (None, ou tuple vide pour les dates voisines) signifie que la
+    sonde correspondante n'a pas ete faite."""
+
+    prix_requete_immediate_cents: int | None = None
+    prix_dates_voisines_cents: tuple[int, ...] = ()
+    plancher_absolu_cents: int | None = None
+    dernier_prix_cents: int | None = None
+    dernier_prix_age_heures: float | None = None
+
+
+@dataclass(frozen=True)
+class ResultatCorroboration:
+    """Verdict final + chaque signal individuel (tracabilite pour les logs
+    et le futur message d'alerte, cf. plan)."""
+
+    verdict: VerdictCorroboration
+    signal_reconfirme: bool
+    signal_voisines_aussi_basses: bool
+    signal_plancher_absolu: bool
+    signal_vitesse_chute: bool
+
+
+def corroborer_erreur_prix(
+    prix_cents: int,
+    echantillon_cents: Sequence[int],
+    signaux: SignauxCorroboration,
+    *,
+    n_min: int = 8,
+    seuil_erreur_z: float = -3.5,
+    seuil_affaire_z: float = -2.0,
+    seuil_chute_pct: float = 0.40,
+    fenetre_dernier_prix_heures: float = 48.0,
+) -> ResultatCorroboration:
+    """Verdict erreur_prix seulement si le signal 1 (re-requete immediate)
+    confirme ET qu'au moins un des signaux 2/3/4 corrobore (AUDIT.md 2.3c) ;
+    sinon retrograde en bonne_affaire. Signal 2 (dates voisines +/- 3 jours) :
+    des voisines aussi anormalement basses sont traitees comme un signal
+    confirmant (une vraie erreur tarifaire - bug de regle de prix, devise,
+    taxe - touche typiquement une plage de dates, pas un seul jour ; decision
+    validee explicitement, voir le plan)."""
+
+    def _reclassifie(p: int) -> Classification:
+        return classifier(
+            p,
+            echantillon_cents,
+            n_min=n_min,
+            seuil_erreur_z=seuil_erreur_z,
+            seuil_affaire_z=seuil_affaire_z,
+        )
+
+    signal_1 = (
+        signaux.prix_requete_immediate_cents is not None
+        and _reclassifie(signaux.prix_requete_immediate_cents) != "normal"
+    )
+    signal_2 = bool(signaux.prix_dates_voisines_cents) and all(
+        _reclassifie(p) != "normal" for p in signaux.prix_dates_voisines_cents
+    )
+    signal_3 = (
+        signaux.plancher_absolu_cents is not None and prix_cents < signaux.plancher_absolu_cents
+    )
+    signal_4 = (
+        signaux.dernier_prix_cents is not None
+        and signaux.dernier_prix_age_heures is not None
+        and signaux.dernier_prix_age_heures < fenetre_dernier_prix_heures
+        and prix_cents < signaux.dernier_prix_cents * (1 - seuil_chute_pct)
+    )
+
+    verdict: VerdictCorroboration = (
+        "erreur_prix" if signal_1 and (signal_2 or signal_3 or signal_4) else "bonne_affaire"
+    )
+    return ResultatCorroboration(
+        verdict=verdict,
+        signal_reconfirme=signal_1,
+        signal_voisines_aussi_basses=signal_2,
+        signal_plancher_absolu=signal_3,
+        signal_vitesse_chute=signal_4,
+    )
+
+
+def dates_voisines_a_sonder(date_depart: str, ecart_jours: int = 3) -> tuple[str, str]:
+    """Les 2 dates a +/- ecart_jours du candidat, a sonder pour le signal 2
+    de corroboration (l'anomalie touche-t-elle aussi les dates voisines ?)."""
+    depart = date.fromisoformat(date_depart)
+    return (
+        (depart - timedelta(days=ecart_jours)).isoformat(),
+        (depart + timedelta(days=ecart_jours)).isoformat(),
+    )

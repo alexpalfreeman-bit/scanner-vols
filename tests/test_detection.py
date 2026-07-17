@@ -409,3 +409,177 @@ def test_classifier_n_min_est_transmis_a_z_score_modifie() -> None:
     # convention (decision documentee) : un n_min desaccorde reste correct,
     # juste degrade (repli qui n'atteint plus le seuil que classifier exige).
     assert detection.classifier(10, _ECHANTILLON_MAD_CONNU, n_min=9) == "donnees_insuffisantes"
+
+
+# ---------------------------------------------------------------- corroborer_erreur_prix (2.3.c)
+
+# median=47000, MAD=3000 (meme echantillon que les tests classifier ci-dessus).
+_ECHANTILLON_CORROBORATION = [40000, 44000, 44000, 46000, 48000, 50000, 50000, 54000]
+_PRIX_CANDIDAT = 18800  # classifier(...) == "candidat_erreur_prix" (z ~ -6.34)
+
+
+def _signaux_avec(
+    *, voisines: bool = False, plancher: bool = False, chute: bool = False
+) -> detection.SignauxCorroboration:
+    """Signal 1 (re-requete) toujours confirmant ; chaque autre signal est
+    soit force a une valeur confirmante, soit a une valeur neutre/absente."""
+    return detection.SignauxCorroboration(
+        prix_requete_immediate_cents=19000,
+        prix_dates_voisines_cents=(19500, 19500) if voisines else (47000, 47000),
+        plancher_absolu_cents=20000 if plancher else None,
+        dernier_prix_cents=40000 if chute else None,
+        dernier_prix_age_heures=24.0 if chute else None,
+    )
+
+
+def test_corroborer_erreur_prix_signal_1_absent_meme_avec_2_3_4() -> None:
+    signaux = detection.SignauxCorroboration(
+        prix_requete_immediate_cents=None,
+        prix_dates_voisines_cents=(19500, 19500),
+        plancher_absolu_cents=20000,
+        dernier_prix_cents=40000,
+        dernier_prix_age_heures=24.0,
+    )
+
+    resultat = detection.corroborer_erreur_prix(_PRIX_CANDIDAT, _ECHANTILLON_CORROBORATION, signaux)
+
+    assert resultat.verdict == "bonne_affaire"
+    assert resultat.signal_reconfirme is False
+
+
+def test_corroborer_erreur_prix_reconfirmation_normale_domine() -> None:
+    signaux = detection.SignauxCorroboration(
+        prix_requete_immediate_cents=47000,  # reclassifie "normal" (== mediane)
+        prix_dates_voisines_cents=(19500, 19500),
+        plancher_absolu_cents=20000,
+        dernier_prix_cents=40000,
+        dernier_prix_age_heures=24.0,
+    )
+
+    resultat = detection.corroborer_erreur_prix(_PRIX_CANDIDAT, _ECHANTILLON_CORROBORATION, signaux)
+
+    assert resultat.verdict == "bonne_affaire"
+    assert resultat.signal_reconfirme is False
+
+
+@pytest.mark.parametrize(
+    ("voisines", "plancher", "chute", "verdict_attendu"),
+    [
+        (False, False, False, "bonne_affaire"),  # signal 1 seul : insuffisant (AUDIT.md 2.3c)
+        (True, False, False, "erreur_prix"),
+        (False, True, False, "erreur_prix"),
+        (False, False, True, "erreur_prix"),
+        (True, True, False, "erreur_prix"),
+        (True, False, True, "erreur_prix"),
+        (False, True, True, "erreur_prix"),
+        (True, True, True, "erreur_prix"),
+    ],
+)
+def test_corroborer_erreur_prix_matrice_signaux(voisines, plancher, chute, verdict_attendu) -> None:
+    signaux = _signaux_avec(voisines=voisines, plancher=plancher, chute=chute)
+
+    resultat = detection.corroborer_erreur_prix(_PRIX_CANDIDAT, _ECHANTILLON_CORROBORATION, signaux)
+
+    assert resultat.verdict == verdict_attendu
+    assert resultat.signal_reconfirme is True
+    assert resultat.signal_voisines_aussi_basses is voisines
+    assert resultat.signal_plancher_absolu is plancher
+    assert resultat.signal_vitesse_chute is chute
+
+
+def test_corroborer_erreur_prix_aucune_date_voisine_sondee() -> None:
+    signaux = detection.SignauxCorroboration(
+        prix_requete_immediate_cents=19000, prix_dates_voisines_cents=()
+    )
+    resultat = detection.corroborer_erreur_prix(_PRIX_CANDIDAT, _ECHANTILLON_CORROBORATION, signaux)
+    assert resultat.signal_voisines_aussi_basses is False
+
+
+def test_corroborer_erreur_prix_une_seule_date_voisine_sondee_basse() -> None:
+    signaux = detection.SignauxCorroboration(
+        prix_requete_immediate_cents=19000, prix_dates_voisines_cents=(19500,)
+    )
+    resultat = detection.corroborer_erreur_prix(_PRIX_CANDIDAT, _ECHANTILLON_CORROBORATION, signaux)
+    assert resultat.signal_voisines_aussi_basses is True
+
+
+def test_corroborer_erreur_prix_deux_dates_voisines_une_normale_une_basse() -> None:
+    # "all" : une seule voisine a prix normal suffit a invalider le signal.
+    signaux = detection.SignauxCorroboration(
+        prix_requete_immediate_cents=19000, prix_dates_voisines_cents=(19500, 47000)
+    )
+    resultat = detection.corroborer_erreur_prix(_PRIX_CANDIDAT, _ECHANTILLON_CORROBORATION, signaux)
+    assert resultat.signal_voisines_aussi_basses is False
+
+
+def test_corroborer_erreur_prix_plancher_absolu_none() -> None:
+    signaux = detection.SignauxCorroboration(
+        prix_requete_immediate_cents=19000, plancher_absolu_cents=None
+    )
+    resultat = detection.corroborer_erreur_prix(_PRIX_CANDIDAT, _ECHANTILLON_CORROBORATION, signaux)
+    assert resultat.signal_plancher_absolu is False
+
+
+def test_corroborer_erreur_prix_plancher_absolu_egalite_stricte() -> None:
+    signaux = detection.SignauxCorroboration(
+        prix_requete_immediate_cents=19000, plancher_absolu_cents=_PRIX_CANDIDAT
+    )
+    resultat = detection.corroborer_erreur_prix(_PRIX_CANDIDAT, _ECHANTILLON_CORROBORATION, signaux)
+    assert resultat.signal_plancher_absolu is False
+
+
+def test_corroborer_erreur_prix_chute_un_seul_champ_fourni() -> None:
+    sans_age = detection.SignauxCorroboration(
+        prix_requete_immediate_cents=19000, dernier_prix_cents=40000, dernier_prix_age_heures=None
+    )
+    sans_prix = detection.SignauxCorroboration(
+        prix_requete_immediate_cents=19000, dernier_prix_cents=None, dernier_prix_age_heures=24.0
+    )
+    for signaux in (sans_age, sans_prix):
+        resultat = detection.corroborer_erreur_prix(
+            _PRIX_CANDIDAT, _ECHANTILLON_CORROBORATION, signaux
+        )
+        assert resultat.signal_vitesse_chute is False
+
+
+def test_corroborer_erreur_prix_chute_age_frontiere_48h_exclue() -> None:
+    signaux = detection.SignauxCorroboration(
+        prix_requete_immediate_cents=19000, dernier_prix_cents=40000, dernier_prix_age_heures=48.0
+    )
+    resultat = detection.corroborer_erreur_prix(_PRIX_CANDIDAT, _ECHANTILLON_CORROBORATION, signaux)
+    assert resultat.signal_vitesse_chute is False
+
+
+def test_corroborer_erreur_prix_chute_age_juste_sous_48h_incluse() -> None:
+    signaux = detection.SignauxCorroboration(
+        prix_requete_immediate_cents=19000, dernier_prix_cents=40000, dernier_prix_age_heures=47.99
+    )
+    resultat = detection.corroborer_erreur_prix(_PRIX_CANDIDAT, _ECHANTILLON_CORROBORATION, signaux)
+    assert resultat.signal_vitesse_chute is True
+
+
+def test_corroborer_erreur_prix_chute_exactement_au_seuil_exclue() -> None:
+    # seuil_chute_pct=0.40 (defaut), dernier_prix=40000 -> plancher 24000 exactement.
+    signaux = detection.SignauxCorroboration(
+        prix_requete_immediate_cents=19000, dernier_prix_cents=40000, dernier_prix_age_heures=24.0
+    )
+    resultat = detection.corroborer_erreur_prix(24_000, _ECHANTILLON_CORROBORATION, signaux)
+    assert resultat.signal_vitesse_chute is False
+
+
+# ---------------------------------------------------------------- dates_voisines_a_sonder (2.3.c)
+
+
+def test_dates_voisines_a_sonder_defaut() -> None:
+    assert detection.dates_voisines_a_sonder("2026-06-15") == ("2026-06-12", "2026-06-18")
+
+
+def test_dates_voisines_a_sonder_ecart_personnalise() -> None:
+    assert detection.dates_voisines_a_sonder("2026-06-15", ecart_jours=7) == (
+        "2026-06-08",
+        "2026-06-22",
+    )
+
+
+def test_dates_voisines_a_sonder_franchissement_mois_annee() -> None:
+    assert detection.dates_voisines_a_sonder("2026-01-01") == ("2025-12-29", "2026-01-04")
