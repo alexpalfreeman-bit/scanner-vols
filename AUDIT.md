@@ -276,7 +276,7 @@ comparés dans la bonne devise (cf. 1.1).
       hiérarchique ; cooldown ; corroboration (chaque combinaison de signaux).
 
 ### 2.4 Couche fournisseurs
-- [ ] `providers/base.py` :
+- [x] `providers/base.py` :
 
 ```python
 from dataclasses import dataclass
@@ -295,15 +295,15 @@ class FournisseurVols(Protocol):
     def meilleure_offre(self, route: "Route") -> Offre | None: ...
 ```
 
-- [ ] `providers/duffel.py` : le code actuel, refactoré derrière ce contrat,
+- [x] `providers/duffel.py` : le code actuel, refactoré derrière ce contrat,
       avec `post_resilient` (1.4) et **validation Pydantic de la réponse**
       (un changement de schéma côté Duffel doit lever une erreur explicite,
       jamais produire des données silencieusement fausses).
-- [ ] Circuit breaker simple par fournisseur : après 5 échecs consécutifs,
+- [x] Circuit breaker simple par fournisseur : après 5 échecs consécutifs,
       suspendre le fournisseur pour le reste du run et le signaler dans le digest.
-- [ ] Route canari (ex. YUL→JFK) vérifiée à chaque run + compteur de réponses
+- [x] Route canari (ex. YUL→JFK) vérifiée à chaque run + compteur de réponses
       « 0 offres » ; taux anormal → avertissement dans le digest technique.
-- [ ] Fixture `tests/fixtures/duffel_offer_request.json` : réponse réaliste
+- [x] Fixture `tests/fixtures/duffel_offer_request.json` : réponse réaliste
       construite d'après le parsing actuel, utilisée par les tests du provider.
 
 ### 2.5 Alerting
@@ -599,3 +599,129 @@ pressure-testée via un agent Plan dédié avant validation.
   tous verts (121 tests) ; poussé sur `refactor-audit`. Comportement
   nominal du scanner inchangé (aucune fonction Phase 1 modifiée, rien de
   câblé côté `scanner.py`).
+
+### Phase 2.4 — couche fournisseurs (2026-07-17)
+
+Périmètre de cette session, donné explicitement par l'utilisateur :
+uniquement `providers/` (`base.py` + `duffel.py`), avec le câblage de
+`scanner.py` limité à la stricte mesure imposée par le changement de
+contrat — pas de câblage du moteur de détection Phase 2.3, pas de Phase 2.5
+(digest technique). Plan pressure-testé via un agent Plan dédié avant
+implémentation (même pratique qu'en Phase 2.3).
+
+- `providers/base.py` (nouveau) : `Offre`/`FournisseurVols` repris quasiment
+  tels quels d'AUDIT.md, avec deux ajouts décidés et documentés dans le code
+  plutôt que dans ce Journal seul : `route: "Route"` devient un alias
+  `type Route = dict[str, Any]` (PEP 695) plutôt qu'un `TypedDict` —
+  `generer_candidats()`/`formater_alerte()` restent inchangés (`dict[Any,
+  Any]` est assignable à `dict[str, Any]`), aucun ripple hors périmètre ;
+  `ResumeFournisseur` + la hiérarchie `ErreurFournisseur`/
+  `ErreurValidationReponse`/`ErreurFournisseurSuspendu` sont ajoutés à côté
+  du contrat minimal demandé — vocabulaire partagé pour un futur 2ᵉ
+  fournisseur (Amadeus, Phase 3 backlog), coût nul aujourd'hui. Le Protocol
+  lui-même reste minimal (juste `nom` + `meilleure_offre`) : circuit
+  breaker/canari/résumé sont des détails de `FournisseurDuffel`, pas du
+  contrat — généraliser le Protocol avant qu'un 2ᵉ fournisseur réel en ait
+  besoin serait spéculatif.
+- `providers/duffel.py` : `chercher_meilleur_vol` (fonction libre) remplacé
+  par `FournisseurDuffel` (classe, état mutable scope au run), qui implémente
+  `FournisseurVols`. La réponse Duffel est validée par des modèles Pydantic
+  privés (`_ReponseOffreRequest` → `_DonneesReponseOffres` → `_OffreDuffel`
+  → `_TrajetDuffel` → `_SegmentDuffel`) avant toute extraction ;
+  `extra="ignore"` explicite (pas le défaut implicite silencieux) pour
+  documenter qu'on tolère le bruit du payload réel et qu'on ne valide que ce
+  qu'on consomme. `Field(min_length=1)` appliqué aux deux niveaux `slices`
+  ET `segments` : une slice à 0 segment aurait sinon silencieusement donné
+  `escales = max(escales, -1)` → `0`, exactement la donnée fausse
+  silencieuse qu'AUDIT.md interdit — trouvé pendant le pressure-test, pas
+  dans la première version du plan. `total_amount` en `Decimal` (pas
+  `float`) : conversion en centimes via `to_integral_value(ROUND_HALF_UP)`,
+  conforme à la règle argent de CLAUDE.md et élimine au passage l'aller-
+  retour IEEE-754 du `float(total_amount)` actuel. `post_resilient`/
+  `extraire_message_erreur`/`creer_session_duffel` inchangés (signature et
+  comportement) : les 5 tests déjà présents passent tels quels.
+- Circuit breaker : 5 échecs consécutifs → suspension pour le run
+  (`ErreurFournisseurSuspendu` levée immédiatement ensuite, sans appel
+  réseau). `_appeler()` enveloppe systématiquement toute source d'échec
+  (réseau, HTTP non-transitoire, schéma invalide) dans la famille
+  `ErreurFournisseur`, ce qui permet à `meilleure_offre()` de catcher
+  précisément ce type plutôt qu'`Exception` large — un vrai bug de
+  programmation continue de remonter bruyamment (toujours rattrapé par le
+  `except Exception` déjà présent dans `scanner.py::main()`, donc aucune
+  régression sur la politique de sortie) sans polluer le bookkeeping du
+  breaker.
+- Route canari : origine de `config.yaml` → `JFK` (constante), aller simple,
+  décalage fixe +4 semaines (indépendant de `sejour.candidats_semaines` pour
+  rester autonome). Passe par `meilleure_offre()`, donc partage le même
+  compteur d'échecs consécutifs que les routes normales — lecture retenue de
+  « 5 échecs consécutifs » : une seule chronologie de tentatives par run, le
+  canari en étant le premier maillon. Contrairement à `meilleure_offre()`,
+  `verifier_canari()` ne propage jamais d'exception (`except Exception`
+  large, volontaire et documenté dans le code) : c'est une sonde
+  explicitement infaillible, pensée pour un appel sans `try`/`except` côté
+  `scanner.py`.
+- `resume()` : retourne un `ResumeFournisseur` (nom, appels_reussis,
+  appels_zero_offres, echecs_total, suspendu). `echecs_total` vient d'un
+  compteur cumulé séparé (`_echecs_cumules`, jamais remis à zéro), distinct
+  du compteur consécutif du breaker (remis à zéro à chaque succès) : un vrai
+  bug trouvé pendant le pressure-test (le compteur consécutif seul aurait
+  donné une valeur trompeuse en fin de run après un succès intercalé). Seuil
+  d'avertissement sur le taux de réponses « 0 offre » : 50 %, minimum 5
+  appels réussis — non spécifié par AUDIT.md, point de départ conservateur
+  assumé comme `seuil_chute_pct` en Phase 2.3 ; `resume()` logge le taux réel
+  en INFO à chaque run (pas seulement au franchissement du seuil) pour
+  accumuler l'historique empirique qui permettrait de le recalibrer plus
+  tard. Le digest technique Telegram lui-même reste Phase 2.5, hors
+  périmètre : l'avertissement aujourd'hui est un log structuré (visible dans
+  les logs GitHub Actions), seul filet de sécurité réel en l'absence du
+  digest.
+- `scanner.py` : câblage minimal imposé par le changement de contrat —
+  `FournisseurDuffel` remplace `creer_session_duffel`/`chercher_meilleur_vol`
+  (supprimée, plus aucun appelant, pas de shim de compatibilité), un appel à
+  `verifier_canari()` avant la boucle de destinations et à `resume()` après,
+  et un shim local `_vol_depuis_offre()` qui reconvertit l'`Offre` (centimes)
+  en dict dollars-flottants pour le reste de `main()` (stats Phase 1,
+  `storage`, `alerting`) — le câblage du moteur de détection Phase 2.3 reste
+  non fait cette session (voir Journal Phase 2.3), le shim est délibérément
+  temporaire et documenté comme tel dans le code, à supprimer à ce câblage.
+  Rien d'autre dans `main()` n'a changé (stats, raisons d'alerte,
+  `ecrire_resume_github`, politique de sortie).
+- Fixture `tests/fixtures/duffel_offer_request.json` : réponse réaliste à 3
+  offres — la moins chère a 1 escale et doit être sélectionnée malgré une
+  offre à 0 escale plus chère et une autre à escales égales mais plus chère
+  (vérifie que c'est le prix, pas le nombre d'escales, qui pilote la
+  sélection) — avec du bruit de payload Duffel réel non consommé (`id`,
+  `expires_at`, `owner`, `base_amount`, `tax_amount`, `aircraft`, etc.) pour
+  prouver que `extra="ignore"` tolère un vrai payload.
+- Séquencement des commits ajusté en cours de route par rapport au plan
+  initial : supprimer `chercher_meilleur_vol` cassait l'import de
+  `scanner.py`, donc la collecte pytest de tout `tests/test_scanner.py` (pas
+  seulement les 3 tests de `main()`) tant que `scanner.py` n'était pas
+  recâblé dans le même commit. Le premier commit regroupe donc
+  `providers/base.py` + refactor `duffel.py` + câblage minimal `scanner.py`
+  (au lieu de les séparer comme esquissé dans le plan), pour que chaque
+  commit reste vert indépendamment (`ruff`/`mypy`/`pytest` complet, pas
+  seulement les fichiers touchés). Circuit breaker, canari, `resume()`
+  restent chacun des commits additifs séparés comme prévu au plan.
+- `tests/test_scanner.py` : les 3 tests de `main()` perdent chacun un
+  paramètre positionnel (9 → 8 `@patch` : `creer_session_duffel` disparaît,
+  `chercher_meilleur_vol` + `creer_session_duffel` fusionnent en un seul
+  patch de la classe `FournisseurDuffel`) — piège identifié pendant le
+  pressure-test, pas juste un renommage de mock. `_vol_sans_alerte()` (dict
+  dollars) devient `_offre_sans_alerte()` (vraie instance `Offre` en
+  centimes), puisque le shim de `scanner.py` s'exécute pour de vrai sur la
+  valeur retournée par le mock. Un test neuf verrouille le câblage
+  (`verifier_canari`/`resume` appelés exactement une fois par `main()`).
+- Tests : 34 tests dans `tests/test_providers.py` (28 nouveaux : validation/
+  sélection, repli compagnie, `offers` absent/null/vide, schéma invalide,
+  HTTP non-ok, arrondi centimes, circuit breaker, canari, `resume` — 6 déjà
+  présents intacts) ; 9 dans `tests/test_scanner.py` (1 nouveau). Aucun accès
+  réseau réel : session injectée via le paramètre keyword-only
+  `FournisseurDuffel(..., session=...)`, et `post_resilient` monkeypatché
+  pour les scénarios d'échecs répétés (évite de dépendre du retry interne de
+  `post_resilient`, déjà testé séparément par ailleurs).
+- Vérifié : `ruff check`, `ruff format --check`, `mypy` et `pytest -q` tous
+  verts (150 tests, 121 + 29) après chaque commit ; poussé sur
+  `refactor-audit`. Comportement nominal inchangé côté détection/alerting/
+  storage (aucune fonction Phase 1 modifiée) : seuls le fetch Duffel et son
+  câblage dans `main()` ont changé.
