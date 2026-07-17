@@ -1,5 +1,7 @@
 from unittest.mock import Mock, patch
 
+import pytest
+
 import scanner
 
 
@@ -64,6 +66,47 @@ def test_raison_prix_max_devise_differente_retourne_none() -> None:
 
 def test_raison_prix_max_aucun_seuil_configure_retourne_none() -> None:
     assert scanner.raison_prix_max(400, "CAD", None, "CAD") is None
+
+
+# ---------------------------------------------------------------- post_resilient (1.4)
+
+
+def test_post_resilient_429_avec_retry_after_puis_succes(monkeypatch) -> None:
+    monkeypatch.setattr(scanner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(scanner.random, "uniform", lambda a, b: 0)
+    reponse_429 = Mock(status_code=429, headers={"Retry-After": "2"})
+    reponse_ok = Mock(status_code=200, headers={})
+    session = Mock()
+    session.post.side_effect = [reponse_429, reponse_ok]
+
+    resultat = scanner.post_resilient(session, "https://exemple.test", {})
+
+    assert resultat is reponse_ok
+    assert session.post.call_count == 2
+
+
+def test_post_resilient_echecs_consecutifs_leve_exception(monkeypatch) -> None:
+    monkeypatch.setattr(scanner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(scanner.random, "uniform", lambda a, b: 0)
+    session = Mock()
+    session.post.return_value = Mock(status_code=503, headers={})
+
+    with pytest.raises(RuntimeError):
+        scanner.post_resilient(session, "https://exemple.test", {}, essais=4)
+
+    assert session.post.call_count == 4
+
+
+def test_post_resilient_404_retour_immediat_sans_retry(monkeypatch) -> None:
+    monkeypatch.setattr(scanner.time, "sleep", lambda _: None)
+    reponse_404 = Mock(status_code=404, headers={})
+    session = Mock()
+    session.post.return_value = reponse_404
+
+    resultat = scanner.post_resilient(session, "https://exemple.test", {})
+
+    assert resultat is reponse_404
+    assert session.post.call_count == 1
 
 
 # ---------------------------------------------------------------- extraire_message_erreur (1.3)

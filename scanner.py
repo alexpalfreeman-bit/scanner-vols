@@ -27,6 +27,7 @@ et fait planter silencieusement le parsing des offres).
 import csv
 import io
 import os
+import random
 import statistics
 import sys
 import time
@@ -132,6 +133,32 @@ def generer_candidats(config: dict) -> list[dict]:
 # ---------------------------------------------------------------- recherche
 
 
+RETRIABLES = {429, 500, 502, 503, 504}
+
+
+def post_resilient(
+    session: requests.Session, url: str, corps: dict, essais: int = 4
+) -> requests.Response:
+    """POST avec retry/backoff exponentiel (+ jitter) sur timeout, erreurs
+    reseau, ou codes HTTP transitoires (429/5xx) ; respecte Retry-After s'il
+    est present. Une erreur non transitoire (4xx hors 429) est retournee
+    immediatement, sans retry."""
+    derniere_erreur: Exception = RuntimeError("aucune tentative")
+    for tentative in range(essais):
+        attente = (2**tentative) + random.uniform(0, 1)
+        try:
+            r = session.post(url, json=corps, timeout=30)
+            if r.status_code not in RETRIABLES:
+                return r
+            attente = max(attente, float(r.headers.get("Retry-After", 0)))
+            derniere_erreur = RuntimeError(f"HTTP {r.status_code} sur {url}")
+        except requests.RequestException as e:
+            derniere_erreur = e
+        if tentative < essais - 1:
+            time.sleep(attente)
+    raise derniere_erreur
+
+
 def extraire_message_erreur(r: requests.Response) -> str:
     """Message d'erreur lisible a partir d'une reponse HTTP en echec. Si le
     corps n'est pas du JSON exploitable (ex. page HTML d'un 502), on retombe
@@ -173,12 +200,7 @@ def chercher_meilleur_vol(session: requests.Session, route: dict, config: dict) 
             "max_connections": 0 if route.get("direct_seulement") else 1,
         }
     }
-    r = session.post(
-        f"{DUFFEL_API_URL}/air/offer_requests",
-        params={"return_offers": "true"},
-        json=body,
-        timeout=30,
-    )
+    r = post_resilient(session, f"{DUFFEL_API_URL}/air/offer_requests?return_offers=true", body)
     if not r.ok:
         raise RuntimeError(extraire_message_erreur(r))
 

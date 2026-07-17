@@ -67,7 +67,7 @@ des dates rend les premiers runs pleins de « nouveaux minimums »).
 `HTTP {status_code}` + les 200 premiers caractères du corps.
 **Test** : réponse 502 avec corps HTML → message d'erreur contenant « 502 ».
 
-### 1.4 Aucun retry / gestion du rate limiting
+### 1.4 Aucun retry / gestion du rate limiting ✅
 **Problème** : une erreur transitoire (timeout, 429, 5xx) = un point de donnée
 perdu ; `time.sleep(0.25)` fixe n'exploite pas `Retry-After`.
 **Correctif** : implémentation de référence à intégrer (module `providers/`) :
