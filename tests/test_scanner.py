@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from unittest.mock import Mock, patch
 
 import pytest
@@ -179,6 +180,34 @@ def test_formater_alerte_echappe_html_compagnie() -> None:
 
     assert "A&amp;B &lt;Air&gt;" in message
     assert "A&B <Air>" not in message
+
+
+# ---------------------------------------------------------------- horodatage_maintenant (1.6)
+
+
+def test_horodatage_maintenant_precision_seconde_et_parsable(monkeypatch) -> None:
+    dt = datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC)
+    horloge = Mock()
+    horloge.now.return_value = dt
+    monkeypatch.setattr(scanner, "datetime", horloge)
+
+    resultat = scanner.horodatage_maintenant()
+
+    assert datetime.fromisoformat(resultat) == dt
+
+
+def test_horodatage_maintenant_appelle_horloge_a_chaque_fois(monkeypatch) -> None:
+    dt1 = datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC)
+    dt2 = datetime(2026, 1, 1, 12, 0, 2, tzinfo=UTC)
+    horloge = Mock()
+    horloge.now.side_effect = [dt1, dt2]
+    monkeypatch.setattr(scanner, "datetime", horloge)
+
+    t1 = scanner.horodatage_maintenant()
+    t2 = scanner.horodatage_maintenant()
+
+    assert t1 != t2
+    assert horloge.now.call_count == 2
 
 
 # ---------------------------------------------------------------- main() : politique de sortie

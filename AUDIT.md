@@ -103,7 +103,7 @@ def post_resilient(session: requests.Session, url: str, corps: dict,
 **Correctif** : `html.escape()` sur toute valeur interpolée dans le message.
 **Test** : compagnie `"A&B <Air>"` → message contenant `A&amp;B &lt;Air&gt;`.
 
-### 1.6 Horodatage
+### 1.6 Horodatage ✅
 **Problème** : timestamp calculé une seule fois par run, précision à la minute.
 **Correctif** : un timestamp ISO 8601 UTC à la seconde **par observation**.
 **Test** : deux observations consécutives ont des timestamps distincts et parsables.

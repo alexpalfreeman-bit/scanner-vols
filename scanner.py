@@ -392,6 +392,13 @@ def ecrire_resume_github(resultats: list[tuple[str, str]]) -> None:
         pass
 
 
+def horodatage_maintenant() -> str:
+    """ISO 8601 UTC a la seconde, un appel par observation (pas une seule
+    fois par run) : deux prix trouves a des instants differents ne doivent
+    jamais partager le meme horodatage."""
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
 def main() -> int:
     try:
         env = charger_env()
@@ -403,7 +410,6 @@ def main() -> int:
     session = creer_session_duffel(env)
     historique = lire_historique()
     detection_cfg = config.get("detection", {})
-    maintenant = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
 
     resultats: list[tuple[str, str]] = []
     for route in generer_candidats(config):
@@ -428,7 +434,7 @@ def main() -> int:
 
         ajouter_historique(
             {
-                "horodatage_utc": maintenant,
+                "horodatage_utc": horodatage_maintenant(),
                 "origine": route["origine"],
                 "destination": route["destination"],
                 "date_depart": route["date_depart"],
