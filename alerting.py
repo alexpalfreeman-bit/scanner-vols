@@ -5,20 +5,58 @@ Formatage (echappement HTML systematique) et envoi des messages d'alerte.
 """
 
 import html
+import random
+import time
 
 import requests
 
 from config import Env
 
+# Mirroir volontairement decouple de providers/duffel.py::RETRIABLES : alerting.py
+# ne doit dependre que de providers.base (contrat generique), jamais d'un
+# fournisseur concret comme providers.duffel - voir aussi SEUIL_TAUX_ZERO_OFFRES
+# plus bas dans ce fichier, meme raisonnement.
+RETRIABLES = {429, 500, 502, 503, 504}
 
-def envoyer_telegram(message: str, env: Env) -> None:
+
+def envoyer_telegram(message: str, env: Env, essais: int = 3) -> None:
+    """POST vers l'API Telegram, avec retry leger (backoff exponentiel +
+    jitter, meme formule que providers.duffel.post_resilient) sur exception
+    reseau ou code HTTP transitoire (429/5xx). essais=3 (vs 4 chez Duffel) :
+    le volume d'appels Telegram par run est bien plus faible qu'un appel
+    fournisseur par destination, pas besoin du meme budget de tentatives.
+
+    Un code non-transitoire (ex. 400/401) leve immediatement, sans retry :
+    r.raise_for_status() vit dans le `else` du try, donc l'HTTPError qu'il
+    leve n'est jamais capture par le `except requests.RequestException` qui
+    gere les retries (HTTPError herite de RequestException - sans ce `else`,
+    un 401 permanent serait retente `essais` fois pour rien).
+
+    Ne relit pas Retry-After / parameters.retry_after : le mecanisme de
+    rate-limit documente par Telegram est un champ du corps JSON, pas l'en-tete
+    HTTP que lit post_resilient - un copier-coller de cette partie serait un
+    no-op silencieux. Reste volontairement plus simple, cf. "retry leger"
+    (AUDIT.md 2.5)."""
     url = f"https://api.telegram.org/bot{env.telegram_bot_token}/sendMessage"
-    r = requests.post(
-        url,
-        data={"chat_id": env.telegram_chat_id, "text": message, "parse_mode": "HTML"},
-        timeout=15,
-    )
-    r.raise_for_status()
+    derniere_erreur: Exception = RuntimeError("aucune tentative")
+    for tentative in range(essais):
+        attente = (2**tentative) + random.uniform(0, 1)
+        try:
+            r = requests.post(
+                url,
+                data={"chat_id": env.telegram_chat_id, "text": message, "parse_mode": "HTML"},
+                timeout=15,
+            )
+        except requests.RequestException as e:
+            derniere_erreur = e
+        else:
+            if r.status_code not in RETRIABLES:
+                r.raise_for_status()
+                return
+            derniere_erreur = RuntimeError(f"HTTP {r.status_code} sur {url}")
+        if tentative < essais - 1:
+            time.sleep(attente)
+    raise derniere_erreur
 
 
 def _echapper(valeur: object) -> str:

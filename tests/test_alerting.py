@@ -1,7 +1,14 @@
 from unittest.mock import Mock, patch
 
+import pytest
+import requests
+
 import alerting
 from config import Env
+
+
+def _env() -> Env:
+    return Env(duffel_access_token="x", telegram_bot_token="123:ABC", telegram_chat_id="42")
 
 
 def test_import_alerting() -> None:
@@ -108,17 +115,72 @@ def test_formater_alerte_tendance_stable() -> None:
     assert "➡️ Tendance stable (+1%)" in message
 
 
-# ---------------------------------------------------------------- envoyer_telegram
+# ---------------------------------------------------------------- envoyer_telegram (retry, 2.5)
 
 
 @patch("alerting.requests.post")
 def test_envoyer_telegram_poste_au_bon_chat(post_mock) -> None:
-    post_mock.return_value = Mock(raise_for_status=Mock())
-    env = Env(duffel_access_token="x", telegram_bot_token="123:ABC", telegram_chat_id="42")
+    post_mock.return_value = Mock(status_code=200, raise_for_status=Mock())
 
-    alerting.envoyer_telegram("un message", env)
+    alerting.envoyer_telegram("un message", _env())
 
     url_appelee = post_mock.call_args.args[0]
     corps = post_mock.call_args.kwargs["data"]
     assert url_appelee == "https://api.telegram.org/bot123:ABC/sendMessage"
     assert corps == {"chat_id": "42", "text": "un message", "parse_mode": "HTML"}
+
+
+@patch("alerting.requests.post")
+def test_envoyer_telegram_retry_reseau_puis_succes(post_mock, monkeypatch) -> None:
+    monkeypatch.setattr(alerting.time, "sleep", lambda _: None)
+    monkeypatch.setattr(alerting.random, "uniform", lambda a, b: 0)
+    post_mock.side_effect = [
+        requests.ConnectionError("boom"),
+        Mock(status_code=200, raise_for_status=Mock()),
+    ]
+
+    alerting.envoyer_telegram("un message", _env())
+
+    assert post_mock.call_count == 2
+
+
+@patch("alerting.requests.post")
+def test_envoyer_telegram_retry_429_puis_succes(post_mock, monkeypatch) -> None:
+    monkeypatch.setattr(alerting.time, "sleep", lambda _: None)
+    monkeypatch.setattr(alerting.random, "uniform", lambda a, b: 0)
+    post_mock.side_effect = [
+        Mock(status_code=429, headers={}),
+        Mock(status_code=200, raise_for_status=Mock()),
+    ]
+
+    alerting.envoyer_telegram("un message", _env())
+
+    assert post_mock.call_count == 2
+
+
+@patch("alerting.requests.post")
+def test_envoyer_telegram_echecs_consecutifs_leve_exception(post_mock, monkeypatch) -> None:
+    monkeypatch.setattr(alerting.time, "sleep", lambda _: None)
+    monkeypatch.setattr(alerting.random, "uniform", lambda a, b: 0)
+    post_mock.side_effect = requests.ConnectionError("boom")
+
+    with pytest.raises(requests.ConnectionError):
+        alerting.envoyer_telegram("un message", _env(), essais=2)
+
+    assert post_mock.call_count == 2
+
+
+@patch("alerting.requests.post")
+def test_envoyer_telegram_4xx_non_transitoire_pas_de_retry(post_mock, monkeypatch) -> None:
+    """Le test cle du bloc : prouve que le HTTPError d'un 4xx non-transitoire
+    n'est pas capture par le except qui gere les retries (sinon un 401
+    permanent serait retente essais fois pour rien)."""
+    monkeypatch.setattr(alerting.time, "sleep", lambda _: None)
+    reponse = Mock(status_code=400)
+    reponse.raise_for_status.side_effect = requests.HTTPError("400 bad request")
+    post_mock.return_value = reponse
+
+    with pytest.raises(requests.HTTPError):
+        alerting.envoyer_telegram("un message", _env())
+
+    assert post_mock.call_count == 1
