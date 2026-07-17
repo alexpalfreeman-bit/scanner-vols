@@ -4,14 +4,22 @@ Fournisseur Duffel (API v2, HTTP direct)
 Note technique : on appelle l'API Duffel directement en HTTP (pas via le
 package PyPI "duffel-api", qui n'a pas ete mis a jour pour l'API v2 de Duffel
 et fait planter silencieusement le parsing des offres).
+
+FournisseurDuffel implemente le contrat FournisseurVols (providers/base.py) :
+la reponse Duffel est validee via des modeles Pydantic prives avant toute
+extraction (AUDIT.md 2.4) - un changement de schema cote Duffel leve
+ErreurValidationReponse au lieu de produire silencieusement une Offre fausse.
 """
 
 import random
 import time
+from decimal import ROUND_HALF_UP, Decimal
 
 import requests
+from pydantic import BaseModel, ConfigDict, Field
 
 from config import Env
+from providers.base import ErreurFournisseur, ErreurValidationReponse, Offre, Route
 
 DUFFEL_API_URL = "https://api.duffel.com"
 DUFFEL_VERSION = "v2"
@@ -67,69 +75,149 @@ def extraire_message_erreur(r: requests.Response) -> str:
         return f"HTTP {r.status_code} : {r.text[:200]}"
 
 
-def chercher_meilleur_vol(session: requests.Session, route: dict, config: dict) -> dict | None:
-    """Retourne l'offre la moins chere pour la route, ou None si rien trouve.
+# ---------------------------------------------------------------- validation Pydantic (2.4)
 
-    Note (audit 1.9) : la doc Duffel v2 confirme que `return_offers=true`
-    embarque "all the offers returned by the airlines" dans la reponse de
-    creation - pas de troncature documentee. Duffel recommande plutot
-    `return_offers=false` + `GET /air/offers?...&sort=total_amount&limit=1`
-    pour profiter de la pagination/tri/filtre cote serveur sur les routes a
-    fort volume d'offres, pas pour corriger un probleme de fiabilite. Vu le
-    volume actuel (une poignee d'offres par route), le tri cote client via
-    min() reste correct et evite de doubler le nombre d'appels API par
-    route. A revisiter si la taille des reponses devient un probleme reel
-    (Phase 2.4 : validation Pydantic de la reponse + circuit breaker)."""
-    # Une "slice" = un trajet (aller). Un aller-retour = deux slices.
-    slices = [
-        {
-            "origin": route["origine"],
-            "destination": route["destination"],
-            "departure_date": str(route["date_depart"]),
-        }
-    ]
-    if route.get("date_retour"):
-        slices.append(
+
+class _ModeleDuffel(BaseModel):
+    """Base commune : tout champ de la reponse Duffel qu'on ne modelise pas
+    ici est ignore (comportement par defaut de Pydantic), pas rejete - on ne
+    valide que ce qu'on consomme reellement. Explicite via ConfigDict plutot
+    que laisse implicite, pour qu'un futur relecteur ne se demande pas si
+    extra="forbid" a ete oublie."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class _CompagnieDuffel(_ModeleDuffel):
+    name: str
+
+
+class _SegmentDuffel(_ModeleDuffel):
+    operating_carrier: _CompagnieDuffel | None = None
+    marketing_carrier: _CompagnieDuffel | None = None
+
+
+class _TrajetDuffel(_ModeleDuffel):
+    # min_length=1 : une slice sans segment ferait silencieusement calculer
+    # escales = -1 en aval (max(escales, len([])-1)) - exactement le genre de
+    # donnee fausse silencieuse qu'AUDIT.md demande d'empecher.
+    segments: list[_SegmentDuffel] = Field(min_length=1)
+
+
+class _OffreDuffel(_ModeleDuffel):
+    # Decimal, pas float : Duffel renvoie une string decimale ("532.10"),
+    # Pydantic la parse nativement sans passer par l'arithmetique flottante
+    # (regle CLAUDE.md : jamais de float pour un montant).
+    total_amount: Decimal
+    total_currency: str = Field(min_length=3, max_length=3)
+    slices: list[_TrajetDuffel] = Field(min_length=1)
+
+
+class _DonneesReponseOffres(_ModeleDuffel):
+    # list | None (pas Field(default_factory=list)) : tolere aussi bien une
+    # cle "offers" absente qu'une valeur explicitement null, comme le fait
+    # le code actuel avec `or []`.
+    offers: list[_OffreDuffel] | None = None
+
+
+class _ReponseOffreRequest(_ModeleDuffel):
+    data: _DonneesReponseOffres
+
+
+def _centimes_depuis_montant(montant: Decimal) -> int:
+    return int((montant * 100).to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def _compagnie_depuis_segment(segment: _SegmentDuffel) -> str:
+    """Nom complet de la compagnie operante (exige par la reglementation US),
+    repli sur la compagnie commerciale si absente, puis "?" si aucune des
+    deux n'est renseignee."""
+    if segment.operating_carrier is not None:
+        return segment.operating_carrier.name
+    if segment.marketing_carrier is not None:
+        return segment.marketing_carrier.name
+    return "?"
+
+
+# ---------------------------------------------------------------- FournisseurDuffel
+
+
+class FournisseurDuffel:
+    """Fournisseur Duffel : implemente FournisseurVols (providers/base.py)."""
+
+    nom = "duffel"
+
+    def __init__(self, env: Env, config: dict, *, session: requests.Session | None = None) -> None:
+        self._session = session or creer_session_duffel(env)
+        self._config = config
+
+    def meilleure_offre(self, route: Route) -> Offre | None:
+        return self._appeler(route)
+
+    def _appeler(self, route: Route) -> Offre | None:
+        """Note (audit 1.9) : la doc Duffel v2 confirme que
+        `return_offers=true` embarque "all the offers returned by the
+        airlines" dans la reponse de creation - pas de troncature
+        documentee. Le tri cote client via min() reste donc correct."""
+        # Une "slice" = un trajet (aller). Un aller-retour = deux slices.
+        slices = [
             {
-                "origin": route["destination"],
-                "destination": route["origine"],
-                "departure_date": str(route["date_retour"]),
+                "origin": route["origine"],
+                "destination": route["destination"],
+                "departure_date": str(route["date_depart"]),
             }
-        )
+        ]
+        if route.get("date_retour"):
+            slices.append(
+                {
+                    "origin": route["destination"],
+                    "destination": route["origine"],
+                    "departure_date": str(route["date_retour"]),
+                }
+            )
 
-    passengers = [{"type": "adult"} for _ in range(config.get("adultes", 1))]
-
-    body = {
-        "data": {
-            "cabin_class": config.get("classe", "economy"),
-            "passengers": passengers,
-            "slices": slices,
-            "max_connections": 0 if route.get("direct_seulement") else 1,
+        passengers = [{"type": "adult"} for _ in range(self._config.get("adultes", 1))]
+        body = {
+            "data": {
+                "cabin_class": self._config.get("classe", "economy"),
+                "passengers": passengers,
+                "slices": slices,
+                "max_connections": 0 if route.get("direct_seulement") else 1,
+            }
         }
-    }
-    r = post_resilient(session, f"{DUFFEL_API_URL}/air/offer_requests?return_offers=true", body)
-    if not r.ok:
-        raise RuntimeError(extraire_message_erreur(r))
 
-    offres = r.json()["data"].get("offers") or []
-    if not offres:
-        return None
+        try:
+            r = post_resilient(
+                self._session, f"{DUFFEL_API_URL}/air/offer_requests?return_offers=true", body
+            )
+        except (requests.RequestException, RuntimeError) as e:
+            raise ErreurFournisseur(str(e)) from e
+        if not r.ok:
+            raise ErreurFournisseur(extraire_message_erreur(r))
 
-    meilleure = min(offres, key=lambda o: float(o["total_amount"]))
+        try:
+            reponse = _ReponseOffreRequest.model_validate(r.json())
+        except ValueError as e:
+            # ValueError capture a la fois JSONDecodeError (corps non-JSON,
+            # herite de ValueError) et pydantic.ValidationError (idem) : un
+            # changement de schema Duffel leve donc toujours une erreur
+            # explicite ici, jamais une extraction silencieusement fausse.
+            raise ErreurValidationReponse(
+                f"reponse Duffel invalide (schema inattendu) : {e}"
+            ) from e
 
-    # Nombre d'escales = segments - 1, additionne sur toutes les slices (max par slice)
-    escales = 0
-    for sl in meilleure["slices"]:
-        escales = max(escales, len(sl["segments"]) - 1)
-    # Nom complet de la compagnie operante du premier segment (exige par la reglementation US)
-    premier_segment = meilleure["slices"][0]["segments"][0]
-    compagnie = (premier_segment.get("operating_carrier") or {}).get("name") or (
-        premier_segment.get("marketing_carrier") or {}
-    ).get("name", "?")
+        offres = reponse.data.offers or []
+        if not offres:
+            return None
 
-    return {
-        "prix": round(float(meilleure["total_amount"]), 2),
-        "devise": meilleure["total_currency"],
-        "compagnie": compagnie,
-        "escales": escales,
-    }
+        meilleure = min(offres, key=lambda o: o.total_amount)
+        escales = max(len(sl.segments) - 1 for sl in meilleure.slices)
+        premier_segment = meilleure.slices[0].segments[0]
+
+        return Offre(
+            prix_cents=_centimes_depuis_montant(meilleure.total_amount),
+            devise=meilleure.total_currency,
+            compagnie=_compagnie_depuis_segment(premier_segment),
+            escales=escales,
+            fournisseur=self.nom,
+        )

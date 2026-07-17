@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from unittest.mock import Mock, patch
 
 import scanner
+from providers.base import Offre
 
 
 def test_import_scanner() -> None:
@@ -70,26 +71,26 @@ def _config_minimal(nb_destinations: int) -> dict:
     }
 
 
-def _vol_sans_alerte() -> dict:
-    return {"prix": 500.0, "devise": "USD", "compagnie": "Test Air", "escales": 0}
+def _offre_sans_alerte() -> Offre:
+    return Offre(
+        prix_cents=50_000, devise="USD", compagnie="Test Air", escales=0, fournisseur="duffel"
+    )
 
 
 @patch("scanner.ecrire_resume_github")
 @patch("scanner.ajouter_historique")
 @patch("scanner.statistiques_destination", return_value=None)
-@patch("scanner.chercher_meilleur_vol")
 @patch("scanner.generer_candidats")
 @patch("scanner.lire_historique", return_value=[])
-@patch("scanner.creer_session_duffel")
+@patch("scanner.FournisseurDuffel")
 @patch("scanner.charger_config")
 @patch("scanner.charger_env")
 def test_main_reussit_si_au_moins_une_route_reussit(
     charger_env_mock,
     charger_config_mock,
-    creer_session_mock,
+    fournisseur_classe_mock,
     lire_historique_mock,
     generer_candidats_mock,
-    chercher_vol_mock,
     stats_mock,
     ajouter_historique_mock,
     resume_mock,
@@ -99,7 +100,11 @@ def test_main_reussit_si_au_moins_une_route_reussit(
         {"origine": "YUL", "destination": f"D{i}", "date_depart": "2026-01-01"} for i in range(3)
     ]
     # 2 routes en erreur API, 1 route réussit sans déclencher d'alerte.
-    chercher_vol_mock.side_effect = [RuntimeError("boom"), RuntimeError("boom"), _vol_sans_alerte()]
+    fournisseur_classe_mock.return_value.meilleure_offre.side_effect = [
+        RuntimeError("boom"),
+        RuntimeError("boom"),
+        _offre_sans_alerte(),
+    ]
 
     assert scanner.main() == 0
 
@@ -107,19 +112,17 @@ def test_main_reussit_si_au_moins_une_route_reussit(
 @patch("scanner.ecrire_resume_github")
 @patch("scanner.ajouter_historique")
 @patch("scanner.statistiques_destination", return_value=None)
-@patch("scanner.chercher_meilleur_vol")
 @patch("scanner.generer_candidats")
 @patch("scanner.lire_historique", return_value=[])
-@patch("scanner.creer_session_duffel")
+@patch("scanner.FournisseurDuffel")
 @patch("scanner.charger_config")
 @patch("scanner.charger_env")
 def test_main_echoue_si_toutes_les_routes_echouent(
     charger_env_mock,
     charger_config_mock,
-    creer_session_mock,
+    fournisseur_classe_mock,
     lire_historique_mock,
     generer_candidats_mock,
-    chercher_vol_mock,
     stats_mock,
     ajouter_historique_mock,
     resume_mock,
@@ -128,7 +131,7 @@ def test_main_echoue_si_toutes_les_routes_echouent(
     generer_candidats_mock.return_value = [
         {"origine": "YUL", "destination": f"D{i}", "date_depart": "2026-01-01"} for i in range(3)
     ]
-    chercher_vol_mock.side_effect = RuntimeError("boom")
+    fournisseur_classe_mock.return_value.meilleure_offre.side_effect = RuntimeError("boom")
 
     assert scanner.main() == 1
 
@@ -139,19 +142,17 @@ def test_main_echoue_si_toutes_les_routes_echouent(
 @patch("scanner.ecrire_resume_github")
 @patch("scanner.ajouter_historique")
 @patch("scanner.statistiques_destination", return_value=None)
-@patch("scanner.chercher_meilleur_vol")
 @patch("scanner.generer_candidats")
 @patch("scanner.lire_historique", return_value=[])
-@patch("scanner.creer_session_duffel")
+@patch("scanner.FournisseurDuffel")
 @patch("scanner.charger_config")
 @patch("scanner.charger_env")
 def test_erreur_api_est_loggee_en_error(
     charger_env_mock,
     charger_config_mock,
-    creer_session_mock,
+    fournisseur_classe_mock,
     lire_historique_mock,
     generer_candidats_mock,
-    chercher_vol_mock,
     stats_mock,
     ajouter_historique_mock,
     resume_mock,
@@ -161,7 +162,7 @@ def test_erreur_api_est_loggee_en_error(
     generer_candidats_mock.return_value = [
         {"origine": "YUL", "destination": "AAA", "date_depart": "2026-01-01"}
     ]
-    chercher_vol_mock.side_effect = RuntimeError("boom")
+    fournisseur_classe_mock.return_value.meilleure_offre.side_effect = RuntimeError("boom")
 
     with caplog.at_level(logging.ERROR, logger="scanner"):
         scanner.main()

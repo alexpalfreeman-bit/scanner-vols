@@ -33,7 +33,8 @@ from datetime import UTC, date, datetime, timedelta
 from alerting import envoyer_telegram, formater_alerte
 from config import ErreurConfiguration, charger_config, charger_env, valider_config
 from detection import est_nouveau_minimum, raison_prix_max, statistiques_destination
-from providers.duffel import chercher_meilleur_vol, creer_session_duffel
+from providers.base import Offre
+from providers.duffel import FournisseurDuffel
 from storage import ajouter_historique, lire_historique
 
 # Force stdout/stderr en UTF-8 : sur Windows, la console utilise par defaut
@@ -112,6 +113,19 @@ def horodatage_maintenant() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _vol_depuis_offre(offre: Offre) -> dict:
+    """Shim temporaire centimes -> dollars flottants : le reste de main()
+    (stats Phase 1, ajouter_historique, raisons d'alerte, formater_alerte)
+    attend encore un dict en dollars flottants jusqu'au cablage du moteur de
+    detection Phase 2.3 (non fait cette session - voir Journal AUDIT.md)."""
+    return {
+        "prix": offre.prix_cents / 100,
+        "devise": offre.devise,
+        "compagnie": offre.compagnie,
+        "escales": offre.escales,
+    }
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     try:
@@ -121,7 +135,7 @@ def main() -> int:
         logger.error("Configuration invalide : %s", e)
         return 1
 
-    session = creer_session_duffel(env)
+    fournisseur = FournisseurDuffel(env, config)
     historique = lire_historique()
     detection_cfg = config.get("detection", {})
 
@@ -129,7 +143,7 @@ def main() -> int:
     for route in generer_candidats(config):
         nom_route = f"{route['origine']}→{route['destination']} ({route['date_depart']})"
         try:
-            vol = chercher_meilleur_vol(session, route, config)
+            offre = fournisseur.meilleure_offre(route)
         except Exception as e:
             logger.error("%s : erreur API : %s", nom_route, e)
             resultats.append((nom_route, f"ERREUR API : {e}"))
@@ -137,6 +151,7 @@ def main() -> int:
         finally:
             time.sleep(0.25)
 
+        vol = None if offre is None else _vol_depuis_offre(offre)
         if vol is None:
             logger.warning("%s : aucun vol trouvé", nom_route)
             resultats.append((nom_route, "aucun vol trouvé"))
