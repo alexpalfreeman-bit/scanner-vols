@@ -325,4 +325,84 @@ class FournisseurVols(Protocol):
 
 ## Journal (rempli par Claude Code au fil des phases)
 
-<!-- Phase 0 — ... -->
+### Phase 0 (2026-07-16)
+
+- Branche `refactor-audit` créée depuis `master` (ce dépôt n'a pas de branche
+  `main` — partout où l'audit dit "main", lire "master"). Un clone imbriqué
+  redondant (`scanner-vols/scanner-vols/`, même remote, branche
+  `refactor-audit` sans commit propre) a été supprimé avant de démarrer.
+- `pyproject.toml` en layout plat (`scanner.py`/`config.py` via
+  `tool.setuptools.py-modules`, pas de `src/` — réservé à la Phase 2).
+  Dépendances épinglées en exact, versions vérifiées via `pip freeze` (déps
+  existantes) et `pip index versions` (nouvelles) au moment de l'implémentation
+  plutôt que devinées.
+- mypy configuré "raisonnablement strict" (pas `strict = true`) : le code
+  existant utilise des génériques nus partout, activer `strict` aurait exigé
+  une réécriture mécanique sans rapport avec les 9 bugs. Plugin
+  `pydantic.mypy` ajouté (nécessaire : sans lui, mypy signale à tort le
+  constructeur sans argument de `BaseSettings` comme invalide).
+- Pas d'outil de lockfile ajouté (pip-tools/uv/poetry) : projet petit, peu de
+  dépendances transitives, pins `==` exacts jugés suffisants pour l'instant.
+- Deux bugs réels découverts en testant (pas dans le scope d'AUDIT.md, corrigés
+  car bloquants) :
+  1. Un nouveau fichier de workflow ajouté dans le commit racine de la branche
+     n'est pas indexé par GitHub Actions tant qu'un push "normal" ultérieur ne
+     le retouche pas (déjà rencontré plus tôt dans l'historique de ce projet).
+  2. `git pull --rebase origin master` (codé en dur) rebasait la branche
+     courante contre `master` au lieu de sa propre branche distante — cassé
+     dès qu'on teste `scan.yml` via `workflow_dispatch` sur une branche autre
+     que `master`. Corrigé en `git pull --rebase` (sans argument), qui
+     s'appuie sur le suivi de branche déjà configuré par `actions/checkout`
+     (même mécanisme que le `git push` existant).
+- 4 écarts ruff + 2 erreurs mypy préexistants dans `scanner.py` corrigés au
+  passage (variable ambiguë, alias `datetime.UTC`, retour `Any` non typé,
+  garde de type sur `stdout`/`stderr.reconfigure`) pour que l'outillage parte
+  propre.
+- Vérifié : `pip install -e ".[dev]"` fonctionne ; `ruff check`/`ruff format
+  --check`/`mypy`/`pytest -q` passent tous ; CI verte sur GitHub
+  (`refactor-audit`) ; `scan.yml` durci déclenché via `workflow_dispatch` sur
+  `refactor-audit` termine avec succès (après correctif du rebase).
+
+### Phase 1 (2026-07-16 → 2026-07-17)
+
+Ordre d'implémentation : 1.8 → 1.1 → 1.3 → 1.4 → 1.2 → 1.5 → 1.6 → 1.7 → 1.9
+(validation de config en fondation d'abord, logging en dernier car il
+retouche tous les points d'appel de `main()`).
+
+- **1.8** : `config.py` — `Env` (pydantic-settings) pour les 3 variables
+  d'environnement, `ConfigApp`/`Sejour`/`Detection`/`Destination` (pydantic
+  `BaseModel`) pour `config.yaml`. `valider_config()` retourne un dict (pas
+  l'objet pydantic) : aucune signature existante ailleurs dans `scanner.py`
+  n'a changé.
+- **1.1 (critique)** : `statistiques_destination()` filtre aussi par devise ;
+  `raison_prix_max()` ignore (avec avertissement loggé) un seuil fixe dont la
+  devise ne correspond pas à l'offre. Conséquence observée en conditions
+  réelles : `MAD`/`CUN` (seuils pensés en CAD) sont maintenant
+  avertis-et-ignorés puisque ce compte Duffel renvoie du USD — comportement
+  correct, pas une régression.
+- **1.2** : `est_nouveau_minimum()` ajoute une garde `echantillon_min` +
+  `marge_minimum_pct` (nouvelle clé `config.yaml`, défaut 3 %) — corrige le
+  bruit observé en production (16/35 destinations alertées le 2ᵉ jour à cause
+  de la rotation des dates).
+- **1.3** / **1.4** : `extraire_message_erreur()` (repli propre sur corps non
+  JSON) et `post_resilient()` (retry/backoff exponentiel + jitter sur
+  429/5xx, respecte `Retry-After`).
+- **1.5** : `formater_alerte()` passe tout champ dynamique par `html.escape()`.
+- **1.6** : `horodatage_maintenant()` appelée par observation (ISO 8601 UTC,
+  précision seconde), plus une seule fois par run.
+- **1.7** : `print()` → `logging` (INFO déroulé nominal, WARNING anomalies
+  bénignes, ERROR échecs).
+- **1.9** : vérifié dans la doc Duffel v2 en direct — `return_offers=true`
+  embarque bien "all the offers returned by the airlines" (pas de troncature
+  documentée) ; la séparation `return_offers=false` + `GET /air/offers` est
+  recommandée par Duffel pour la pagination/tri côté serveur, pas pour la
+  fiabilité. Pas de changement de code (doublerait les appels API sans
+  problème observé) ; conclusion documentée en docstring, candidat Phase 2
+  (`providers/duffel.py`) si la taille de payload devient un jour un
+  problème réel.
+- Vérification finale : suite `pytest -q` complète verte (27 tests) après
+  chaque commit ; un run local complet (`python scanner.py`, 37 destinations)
+  confirme le comportement nominal inchangé (aucune erreur, logs
+  structurés lisibles) et montre exactement l'avertissement devise attendu
+  sur `MAD`/`CUN` — la seule différence de comportement sur données saines,
+  et c'est la correction du bug 1.1, pas une régression.
