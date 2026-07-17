@@ -1,16 +1,19 @@
 """
 Stockage de l'historique des prix (SQLite).
 -----------------------------------------------
-Interface repository : lire_historique() / ajouter_historique(ligne) gardent
-la meme forme (dict, prix en dollars flottants) qu'avec l'ancien backend CSV
-(Phase 2.1), pour que scanner.py et detection.py n'aient pas a changer. La
-conversion vers/depuis les centimes entiers (regle CLAUDE.md sur l'argent)
-se fait uniquement a cette frontiere : le reste du pipeline reste en dollars
-flottants jusqu'a la reecriture du moteur de detection (Phase 2.3).
+Interface repository, deux familles de lecture/ecriture cote a cote (Phase
+2.3/2.4 cablage, AUDIT.md) :
+- lire_historique() : forme dollars flottants (dict), alimente le moteur
+  Phase 1 conserve (detection.statistiques_destination) ;
+- lire_observations()/enregistrer_observation() : forme native de la table
+  observations (prix_cents entiers, regle CLAUDE.md sur l'argent), alimente
+  le nouveau moteur (detection.echantillon_comparable) ;
+- obtenir_derniere_alerte()/enregistrer_alerte() : dedup/cooldown (table
+  alertes) pour detection.doit_alerter, cote alerting.envoyer_alerte.
 """
 
 import sqlite3
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
@@ -99,7 +102,7 @@ def obtenir_ou_creer_route(conn: sqlite3.Connection, origine: str, destination: 
     return int(ligne["id"])
 
 
-def _horizon_jours(observe_le: str, date_depart: str) -> int:
+def horizon_jours(observe_le: str, date_depart: str) -> int:
     jour_observation = datetime.fromisoformat(observe_le).date()
     return (date.fromisoformat(date_depart) - jour_observation).days
 
@@ -128,7 +131,7 @@ def inserer_observation(
             observe_le,
             date_depart,
             date_retour,
-            _horizon_jours(observe_le, date_depart),
+            horizon_jours(observe_le, date_depart),
             prix_cents,
             devise,
             compagnie,
@@ -164,20 +167,113 @@ def lire_historique() -> list[dict]:
     ]
 
 
-def ajouter_historique(ligne: dict) -> None:
+def enregistrer_observation(
+    *,
+    origine: str,
+    destination: str,
+    observe_le: str,
+    date_depart: str,
+    date_retour: str | None,
+    prix_cents: int,
+    devise: str,
+    compagnie: str | None,
+    escales: int | None,
+) -> int:
+    """Cree-ou-recupere la route puis insere l'observation (centimes natifs,
+    aucun aller-retour par les dollars flottants) ; retourne route_id, dont
+    le moteur de detection (echantillon_comparable) et la dedup d'alertes
+    (obtenir_derniere_alerte/enregistrer_alerte) ont besoin en aval."""
     conn = obtenir_connexion()
     try:
-        route_id = obtenir_ou_creer_route(conn, ligne["origine"], ligne["destination"])
+        route_id = obtenir_ou_creer_route(conn, origine, destination)
         inserer_observation(
             conn,
             route_id=route_id,
-            observe_le=ligne["horodatage_utc"],
-            date_depart=ligne["date_depart"],
-            date_retour=ligne.get("date_retour") or None,
-            prix_cents=round(float(ligne["prix"]) * 100),
-            devise=ligne["devise"],
-            compagnie=ligne.get("compagnie"),
-            escales=ligne.get("escales"),
+            observe_le=observe_le,
+            date_depart=date_depart,
+            date_retour=date_retour,
+            prix_cents=prix_cents,
+            devise=devise,
+            compagnie=compagnie,
+            escales=escales,
+        )
+        conn.commit()
+        return route_id
+    finally:
+        conn.close()
+
+
+def _observe_le_normalise(valeur: str) -> str:
+    """Normalise un observe_le naif (observations anterieures au fix 1.6,
+    horodatage UTC systematique depuis - certaines lignes migrees depuis
+    l'ancien data/history.csv n'ont pas de fuseau) en UTC explicite : la
+    convention CLAUDE.md est que tout timestamp du projet represente deja
+    l'UTC, un timestamp naif n'a donc jamais represente une autre zone, seul
+    le marqueur de fuseau manque. Necessaire ici (pas dans lire_historique,
+    qui ne fait que trier ces chaines) : echantillon_comparable est le
+    premier appelant a parser observe_le en datetime pour le comparer a un
+    datetime UTC-aware, ce qui leve TypeError sur un naif non normalise."""
+    dt = datetime.fromisoformat(valeur)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.isoformat()
+
+
+def lire_observations() -> list[dict]:
+    """Lecture native (prix_cents entiers, sans jointure) : alimente
+    detection.echantillon_comparable, qui filtre lui-meme par route_id/
+    devise/recence sur la liste complete (meme pattern que lire_historique,
+    un seul fetch avant la boucle des routes - voir scanner.py)."""
+    conn = obtenir_connexion()
+    try:
+        lignes = conn.execute(
+            "SELECT route_id, devise, observe_le, date_depart, horizon_jours, prix_cents "
+            "FROM observations"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "route_id": ligne["route_id"],
+            "devise": ligne["devise"],
+            "observe_le": _observe_le_normalise(ligne["observe_le"]),
+            "date_depart": ligne["date_depart"],
+            "horizon_jours": ligne["horizon_jours"],
+            "prix_cents": ligne["prix_cents"],
+        }
+        for ligne in lignes
+    ]
+
+
+def obtenir_derniere_alerte(route_id: int, date_depart: str, type_alerte: str) -> dict | None:
+    """Ligne alertes correspondant a (route_id, date_depart, type) - au plus
+    une, grace a idx_dedup. Alimente alerte_precedente de detection.doit_alerter."""
+    conn = obtenir_connexion()
+    try:
+        ligne = conn.execute(
+            "SELECT prix_cents, envoyee_le FROM alertes "
+            "WHERE route_id = ? AND date_depart = ? AND type = ?",
+            (route_id, date_depart, type_alerte),
+        ).fetchone()
+    finally:
+        conn.close()
+    return {"prix_cents": ligne["prix_cents"], "envoyee_le": ligne["envoyee_le"]} if ligne else None
+
+
+def enregistrer_alerte(
+    *, route_id: int, date_depart: str, type_alerte: str, prix_cents: int, envoyee_le: str
+) -> None:
+    """Upsert (pas juste insert) : une realerte legitime apres cooldown doit
+    ecraser la ligne existante pour que le prochain cooldown reparte de la
+    nouvelle valeur, d'ou DO UPDATE (pas DO NOTHING comme routes)."""
+    conn = obtenir_connexion()
+    try:
+        conn.execute(
+            "INSERT INTO alertes (route_id, date_depart, type, prix_cents, envoyee_le) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (route_id, date_depart, type) "
+            "DO UPDATE SET prix_cents = excluded.prix_cents, envoyee_le = excluded.envoyee_le",
+            (route_id, date_depart, type_alerte, prix_cents, envoyee_le),
         )
         conn.commit()
     finally:

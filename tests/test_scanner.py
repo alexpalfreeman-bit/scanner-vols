@@ -78,9 +78,10 @@ def _offre_sans_alerte() -> Offre:
 
 
 @patch("scanner.ecrire_resume_github")
-@patch("scanner.ajouter_historique")
+@patch("scanner.enregistrer_observation", return_value=1)
 @patch("scanner.statistiques_destination", return_value=None)
 @patch("scanner.generer_candidats")
+@patch("scanner.lire_observations", return_value=[])
 @patch("scanner.lire_historique", return_value=[])
 @patch("scanner.FournisseurDuffel")
 @patch("scanner.charger_config")
@@ -90,9 +91,10 @@ def test_main_reussit_si_au_moins_une_route_reussit(
     charger_config_mock,
     fournisseur_classe_mock,
     lire_historique_mock,
+    lire_observations_mock,
     generer_candidats_mock,
     stats_mock,
-    ajouter_historique_mock,
+    enregistrer_observation_mock,
     resume_mock,
 ) -> None:
     charger_config_mock.return_value = _config_minimal(3)
@@ -110,9 +112,10 @@ def test_main_reussit_si_au_moins_une_route_reussit(
 
 
 @patch("scanner.ecrire_resume_github")
-@patch("scanner.ajouter_historique")
+@patch("scanner.enregistrer_observation", return_value=1)
 @patch("scanner.statistiques_destination", return_value=None)
 @patch("scanner.generer_candidats")
+@patch("scanner.lire_observations", return_value=[])
 @patch("scanner.lire_historique", return_value=[])
 @patch("scanner.FournisseurDuffel")
 @patch("scanner.charger_config")
@@ -122,9 +125,10 @@ def test_main_echoue_si_toutes_les_routes_echouent(
     charger_config_mock,
     fournisseur_classe_mock,
     lire_historique_mock,
+    lire_observations_mock,
     generer_candidats_mock,
     stats_mock,
-    ajouter_historique_mock,
+    enregistrer_observation_mock,
     resume_mock,
 ) -> None:
     charger_config_mock.return_value = _config_minimal(3)
@@ -137,9 +141,10 @@ def test_main_echoue_si_toutes_les_routes_echouent(
 
 
 @patch("scanner.ecrire_resume_github")
-@patch("scanner.ajouter_historique")
+@patch("scanner.enregistrer_observation", return_value=1)
 @patch("scanner.statistiques_destination", return_value=None)
 @patch("scanner.generer_candidats")
+@patch("scanner.lire_observations", return_value=[])
 @patch("scanner.lire_historique", return_value=[])
 @patch("scanner.FournisseurDuffel")
 @patch("scanner.charger_config")
@@ -149,9 +154,10 @@ def test_main_appelle_verifier_canari_et_resume_une_fois(
     charger_config_mock,
     fournisseur_classe_mock,
     lire_historique_mock,
+    lire_observations_mock,
     generer_candidats_mock,
     stats_mock,
-    ajouter_historique_mock,
+    enregistrer_observation_mock,
     resume_mock,
 ) -> None:
     charger_config_mock.return_value = _config_minimal(2)
@@ -173,9 +179,10 @@ def test_main_appelle_verifier_canari_et_resume_une_fois(
 
 
 @patch("scanner.ecrire_resume_github")
-@patch("scanner.ajouter_historique")
+@patch("scanner.enregistrer_observation", return_value=1)
 @patch("scanner.statistiques_destination", return_value=None)
 @patch("scanner.generer_candidats")
+@patch("scanner.lire_observations", return_value=[])
 @patch("scanner.lire_historique", return_value=[])
 @patch("scanner.FournisseurDuffel")
 @patch("scanner.charger_config")
@@ -185,9 +192,10 @@ def test_erreur_api_est_loggee_en_error(
     charger_config_mock,
     fournisseur_classe_mock,
     lire_historique_mock,
+    lire_observations_mock,
     generer_candidats_mock,
     stats_mock,
-    ajouter_historique_mock,
+    enregistrer_observation_mock,
     resume_mock,
     caplog,
 ) -> None:
@@ -202,3 +210,59 @@ def test_erreur_api_est_loggee_en_error(
 
     assert "boom" in caplog.text
     assert "ERROR" in caplog.text
+
+
+# ---------------------------------------------------------------- mode observation (Session A)
+
+
+@patch("scanner.ecrire_resume_github")
+@patch("scanner.enregistrer_observation", return_value=1)
+@patch("scanner.statistiques_destination", return_value=None)
+@patch("scanner.generer_candidats")
+@patch("scanner.lire_observations")
+@patch("scanner.lire_historique", return_value=[])
+@patch("scanner.FournisseurDuffel")
+@patch("scanner.charger_config")
+@patch("scanner.charger_env")
+def test_main_logge_la_classification_z_score_sans_alerter(
+    charger_env_mock,
+    charger_config_mock,
+    fournisseur_classe_mock,
+    lire_historique_mock,
+    lire_observations_mock,
+    generer_candidats_mock,
+    stats_mock,
+    enregistrer_observation_mock,
+    resume_mock,
+    caplog,
+) -> None:
+    """Preuve que le nouveau moteur (echantillon_comparable -> classifier)
+    tourne reellement en mode observation : la classification est loggee,
+    mais aucune assertion ici ne porte sur un envoi d'alerte (non cable
+    cette session, voir AUDIT.md Journal Session A)."""
+    charger_config_mock.return_value = _config_minimal(1)
+    generer_candidats_mock.return_value = [
+        {"origine": "YUL", "destination": "AAA", "date_depart": "2026-01-01"}
+    ]
+    # 8 observations comparables (route_id=1, meme mois que la candidate,
+    # devise USD) avec une vraie dispersion (MAD non nul) : l'offre a 20000
+    # cents est nettement sous ce groupe -> candidat_erreur_prix attendu.
+    lire_observations_mock.return_value = [
+        {
+            "route_id": 1,
+            "devise": "USD",
+            "observe_le": "2026-01-01T00:00:00+00:00",
+            "date_depart": "2026-01-01",
+            "horizon_jours": 0,
+            "prix_cents": prix,
+        }
+        for prix in (40_000, 45_000, 48_000, 49_000, 51_000, 52_000, 55_000, 60_000)
+    ]
+    fournisseur_classe_mock.return_value.meilleure_offre.return_value = Offre(
+        prix_cents=20_000, devise="USD", compagnie="Test Air", escales=0, fournisseur="duffel"
+    )
+
+    with caplog.at_level(logging.INFO, logger="scanner"):
+        scanner.main()
+
+    assert "classification z-score = candidat_erreur_prix" in caplog.text

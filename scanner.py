@@ -6,7 +6,7 @@ liste mondiale :
   1. Choisit une date de depart candidate par rotation (~3 a ~6 mois a l'avance)
   2. Cree un "offer request" Duffel pour un sejour de N nuits
   3. Retient l'offre la moins chere
-  4. Enregistre le prix dans data/history.csv (historique)
+  4. Enregistre le prix dans data/scanner.db (historique)
   5. Envoie une alerte Telegram si :
        - le prix passe sous le seuil fixe "prix_max" (optionnel) de la destination, OU
        - le prix est un nouveau minimum historique pour cette destination, OU
@@ -32,10 +32,15 @@ from datetime import UTC, date, datetime, timedelta
 
 from alerting import envoyer_telegram, formater_alerte
 from config import ErreurConfiguration, charger_config, charger_env, valider_config
-from detection import est_nouveau_minimum, raison_prix_max, statistiques_destination
-from providers.base import Offre
+from detection import (
+    classifier,
+    echantillon_comparable,
+    est_nouveau_minimum,
+    raison_prix_max,
+    statistiques_destination,
+)
 from providers.duffel import FournisseurDuffel
-from storage import ajouter_historique, lire_historique
+from storage import enregistrer_observation, horizon_jours, lire_historique, lire_observations
 
 # Force stdout/stderr en UTF-8 : sur Windows, la console utilise par defaut
 # un codepage (ex. cp1252) qui plante sur les caracteres comme "->". Le
@@ -113,19 +118,6 @@ def horodatage_maintenant() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def _vol_depuis_offre(offre: Offre) -> dict:
-    """Shim temporaire centimes -> dollars flottants : le reste de main()
-    (stats Phase 1, ajouter_historique, raisons d'alerte, formater_alerte)
-    attend encore un dict en dollars flottants jusqu'au cablage du moteur de
-    detection Phase 2.3 (non fait cette session - voir Journal AUDIT.md)."""
-    return {
-        "prix": offre.prix_cents / 100,
-        "devise": offre.devise,
-        "compagnie": offre.compagnie,
-        "escales": offre.escales,
-    }
-
-
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     try:
@@ -138,6 +130,7 @@ def main() -> int:
     fournisseur = FournisseurDuffel(env, config)
     fournisseur.verifier_canari()
     historique = lire_historique()
+    observations_brutes = lire_observations()
     detection_cfg = config.get("detection", {})
 
     resultats: list[tuple[str, str]] = []
@@ -152,73 +145,102 @@ def main() -> int:
         finally:
             time.sleep(0.25)
 
-        vol = None if offre is None else _vol_depuis_offre(offre)
-        if vol is None:
+        if offre is None:
             logger.warning("%s : aucun vol trouvé", nom_route)
             resultats.append((nom_route, "aucun vol trouvé"))
             continue
 
         stats = statistiques_destination(
-            historique, route["origine"], route["destination"], vol["devise"], config
+            historique, route["origine"], route["destination"], offre.devise, config
         )
 
-        ajouter_historique(
-            {
-                "horodatage_utc": horodatage_maintenant(),
-                "origine": route["origine"],
-                "destination": route["destination"],
-                "date_depart": route["date_depart"],
-                "date_retour": route.get("date_retour", ""),
-                "prix": vol["prix"],
-                "devise": vol["devise"],
-                "compagnie": vol["compagnie"],
-                "escales": vol["escales"],
-            }
+        horodatage = horodatage_maintenant()
+        route_id = enregistrer_observation(
+            origine=route["origine"],
+            destination=route["destination"],
+            observe_le=horodatage,
+            date_depart=route["date_depart"],
+            date_retour=route.get("date_retour") or None,
+            prix_cents=offre.prix_cents,
+            devise=offre.devise,
+            compagnie=offre.compagnie,
+            escales=offre.escales,
         )
 
+        # Mode observation (Session A, AUDIT.md 2.3 câblage) : la classification
+        # est calculée et loggée mais ne déclenche encore aucune alerte - le
+        # câblage complet (envoyer_alerte/corroboration/digest) est prévu en
+        # session suivante, une fois ces classifications sanity-checkées contre
+        # du trafic réel.
+        maintenant = datetime.fromisoformat(horodatage)
+        horizon = horizon_jours(horodatage, route["date_depart"])
+        echantillon = echantillon_comparable(
+            observations_brutes,
+            route_id=route_id,
+            devise=offre.devise,
+            date_depart_candidat=route["date_depart"],
+            horizon_jours_candidat=horizon,
+            maintenant=maintenant,
+        )
+        classification = classifier(offre.prix_cents, echantillon.prix_cents)
+        logger.info(
+            "%s : classification z-score = %s (niveau=%s, n=%s)",
+            nom_route,
+            classification,
+            echantillon.niveau,
+            echantillon.n,
+        )
+
+        prix_dollars = offre.prix_cents / 100
         raisons = []
-        if route.get("prix_max") is not None and vol["devise"] != config["devise"]:
+        if route.get("prix_max") is not None and offre.devise != config["devise"]:
             logger.warning(
                 "%s : prix_max ignoré (configuré en %s, offre en %s)",
                 nom_route,
                 config["devise"],
-                vol["devise"],
+                offre.devise,
             )
         raison_seuil = raison_prix_max(
-            vol["prix"], vol["devise"], route.get("prix_max"), config["devise"]
+            prix_dollars, offre.devise, route.get("prix_max"), config["devise"]
         )
         if raison_seuil:
             raisons.append(raison_seuil)
         echantillon_min = detection_cfg.get("echantillon_min", 5)
         marge_minimum_pct = detection_cfg.get("marge_minimum_pct", 0.03)
-        if stats and est_nouveau_minimum(vol["prix"], stats, echantillon_min, marge_minimum_pct):
-            raisons.append(f"nouveau minimum historique (précédent {stats['min']} {vol['devise']})")
+        if stats and est_nouveau_minimum(prix_dollars, stats, echantillon_min, marge_minimum_pct):
+            raisons.append(f"nouveau minimum historique (précédent {stats['min']} {offre.devise})")
         if stats and stats["n"] >= detection_cfg.get("echantillon_min", 5):
             seuil_bonne_affaire = detection_cfg.get("seuil_bonne_affaire_pct", 0.15)
             plafond = stats["mediane"] * (1 - seuil_bonne_affaire)
-            if vol["prix"] <= plafond:
-                baisse_pct = 1 - vol["prix"] / stats["mediane"]
+            if prix_dollars <= plafond:
+                baisse_pct = 1 - prix_dollars / stats["mediane"]
                 seuil_erreur = detection_cfg.get("seuil_erreur_prix_pct", 0.40)
                 label = "possible erreur de prix" if baisse_pct >= seuil_erreur else "bonne affaire"
                 raisons.append(
-                    f"{label} : {baisse_pct:.0%} sous la médiane ({stats['mediane']:.0f} {vol['devise']})"
+                    f"{label} : {baisse_pct:.0%} sous la médiane ({stats['mediane']:.0f} {offre.devise})"
                 )
 
         if raisons:
+            vol = {
+                "prix": prix_dollars,
+                "devise": offre.devise,
+                "compagnie": offre.compagnie,
+                "escales": offre.escales,
+            }
             message = formater_alerte(route, vol, raisons, stats)
             try:
                 envoyer_telegram(message, env)
-                logger.info("%s : alerte envoyée (%s %s)", nom_route, vol["prix"], vol["devise"])
-                resultats.append((nom_route, f"alerte envoyée : {vol['prix']} {vol['devise']}"))
+                logger.info("%s : alerte envoyée (%s %s)", nom_route, prix_dollars, offre.devise)
+                resultats.append((nom_route, f"alerte envoyée : {prix_dollars} {offre.devise}"))
             except Exception as e:
                 logger.error("%s : erreur Telegram : %s", nom_route, e)
                 resultats.append((nom_route, f"ERREUR TELEGRAM : {e}"))
         else:
             mediane = f"{stats['mediane']:.0f}" if stats else "?"
             logger.info(
-                "%s : ok (%s %s, médiane %s)", nom_route, vol["prix"], vol["devise"], mediane
+                "%s : ok (%s %s, médiane %s)", nom_route, prix_dollars, offre.devise, mediane
             )
-            resultats.append((nom_route, f"ok : {vol['prix']} {vol['devise']}"))
+            resultats.append((nom_route, f"ok : {prix_dollars} {offre.devise}"))
 
     fournisseur.resume()
     ecrire_resume_github(resultats)

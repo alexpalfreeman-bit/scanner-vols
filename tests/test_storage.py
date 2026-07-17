@@ -76,7 +76,7 @@ def test_inserer_observation_calcule_horizon_jours(tmp_path, monkeypatch) -> Non
     conn.close()
 
 
-# ---------------------------------------------------------------- lire_historique / ajouter_historique
+# ---------------------------------------------------------------- lire_historique / enregistrer_observation
 
 
 def test_lire_historique_base_vide_retourne_liste_vide(tmp_path, monkeypatch) -> None:
@@ -84,21 +84,20 @@ def test_lire_historique_base_vide_retourne_liste_vide(tmp_path, monkeypatch) ->
     assert storage.lire_historique() == []
 
 
-def test_ajouter_puis_lire_historique_round_trip(tmp_path, monkeypatch) -> None:
+def test_enregistrer_observation_puis_lire_historique_round_trip(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
-    ligne = {
-        "horodatage_utc": "2026-01-01T00:00:00+00:00",
-        "origine": "YUL",
-        "destination": "CDG",
-        "date_depart": "2026-06-01",
-        "date_retour": "2026-06-13",
-        "prix": 410.19,
-        "devise": "USD",
-        "compagnie": "Test Air",
-        "escales": 0,
-    }
 
-    storage.ajouter_historique(ligne)
+    storage.enregistrer_observation(
+        origine="YUL",
+        destination="CDG",
+        observe_le="2026-01-01T00:00:00+00:00",
+        date_depart="2026-06-01",
+        date_retour="2026-06-13",
+        prix_cents=41019,
+        devise="USD",
+        compagnie="Test Air",
+        escales=0,
+    )
     lignes = storage.lire_historique()
 
     assert len(lignes) == 1
@@ -108,65 +107,264 @@ def test_ajouter_puis_lire_historique_round_trip(tmp_path, monkeypatch) -> None:
     assert lignes[0]["devise"] == "USD"
 
 
-def test_ajouter_historique_sans_date_retour(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
-    ligne = {
-        "horodatage_utc": "2026-01-01T00:00:00+00:00",
-        "origine": "YUL",
-        "destination": "CDG",
-        "date_depart": "2026-06-01",
-        "date_retour": "",
-        "prix": 500.0,
-        "devise": "USD",
-        "compagnie": "Test Air",
-        "escales": 0,
-    }
-
-    storage.ajouter_historique(ligne)
-    lignes = storage.lire_historique()
-
-    assert lignes[0]["date_retour"] == ""
-
-
-def test_ajouter_historique_deux_observations_meme_route(tmp_path, monkeypatch) -> None:
+def test_enregistrer_observation_retourne_meme_route_id_deuxieme_appel(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
     base = {
         "origine": "YUL",
         "destination": "CDG",
         "date_depart": "2026-06-01",
-        "date_retour": "",
+        "date_retour": None,
+        "prix_cents": 50000,
         "devise": "USD",
         "compagnie": "Test Air",
         "escales": 0,
     }
 
-    storage.ajouter_historique(
-        {**base, "horodatage_utc": "2026-01-01T00:00:00+00:00", "prix": 500.0}
+    id1 = storage.enregistrer_observation(observe_le="2026-01-01T00:00:00+00:00", **base)
+    id2 = storage.enregistrer_observation(observe_le="2026-01-02T00:00:00+00:00", **base)
+
+    assert id1 == id2
+
+
+def test_enregistrer_observation_sans_date_retour(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+
+    storage.enregistrer_observation(
+        origine="YUL",
+        destination="CDG",
+        observe_le="2026-01-01T00:00:00+00:00",
+        date_depart="2026-06-01",
+        date_retour=None,
+        prix_cents=50000,
+        devise="USD",
+        compagnie="Test Air",
+        escales=0,
     )
-    storage.ajouter_historique(
-        {**base, "horodatage_utc": "2026-01-02T00:00:00+00:00", "prix": 480.0}
+    lignes = storage.lire_historique()
+
+    assert lignes[0]["date_retour"] == ""
+
+
+def test_enregistrer_observation_deux_observations_meme_route(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    base = {
+        "origine": "YUL",
+        "destination": "CDG",
+        "date_depart": "2026-06-01",
+        "date_retour": None,
+        "devise": "USD",
+        "compagnie": "Test Air",
+        "escales": 0,
+    }
+
+    storage.enregistrer_observation(
+        observe_le="2026-01-01T00:00:00+00:00", prix_cents=50000, **base
+    )
+    storage.enregistrer_observation(
+        observe_le="2026-01-02T00:00:00+00:00", prix_cents=48000, **base
     )
 
     lignes = storage.lire_historique()
     assert [ligne["prix"] for ligne in lignes] == [pytest.approx(500.0), pytest.approx(480.0)]
 
 
-def test_ajouter_historique_cree_le_dossier_parent(tmp_path, monkeypatch) -> None:
+def test_enregistrer_observation_cree_le_dossier_parent(tmp_path, monkeypatch) -> None:
     chemin = tmp_path / "sous_dossier" / "scanner.db"
     monkeypatch.setattr(storage, "DB_FILE", chemin)
 
-    storage.ajouter_historique(
-        {
-            "horodatage_utc": "2026-01-01T00:00:00+00:00",
-            "origine": "YUL",
-            "destination": "CDG",
-            "date_depart": "2026-06-01",
-            "date_retour": "",
-            "prix": 500.0,
-            "devise": "USD",
-            "compagnie": "Test Air",
-            "escales": 0,
-        }
+    storage.enregistrer_observation(
+        origine="YUL",
+        destination="CDG",
+        observe_le="2026-01-01T00:00:00+00:00",
+        date_depart="2026-06-01",
+        date_retour=None,
+        prix_cents=50000,
+        devise="USD",
+        compagnie="Test Air",
+        escales=0,
     )
 
     assert chemin.exists()
+
+
+# ---------------------------------------------------------------- lire_observations
+
+
+def test_lire_observations_base_vide_retourne_liste_vide(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    assert storage.lire_observations() == []
+
+
+def test_lire_observations_forme_native_centimes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+
+    route_id = storage.enregistrer_observation(
+        origine="YUL",
+        destination="CDG",
+        observe_le="2026-01-01T00:00:00+00:00",
+        date_depart="2026-06-01",
+        date_retour=None,
+        prix_cents=50000,
+        devise="USD",
+        compagnie="Test Air",
+        escales=0,
+    )
+
+    lignes = storage.lire_observations()
+
+    assert lignes == [
+        {
+            "route_id": route_id,
+            "devise": "USD",
+            "observe_le": "2026-01-01T00:00:00+00:00",
+            "date_depart": "2026-06-01",
+            "horizon_jours": storage.horizon_jours("2026-01-01T00:00:00+00:00", "2026-06-01"),
+            "prix_cents": 50000,
+        }
+    ]
+
+
+def test_lire_observations_plusieurs_routes_et_devises(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+
+    storage.enregistrer_observation(
+        origine="YUL",
+        destination="CDG",
+        observe_le="2026-01-01T00:00:00+00:00",
+        date_depart="2026-06-01",
+        date_retour=None,
+        prix_cents=50000,
+        devise="USD",
+        compagnie="Test Air",
+        escales=0,
+    )
+    storage.enregistrer_observation(
+        origine="YUL",
+        destination="LHR",
+        observe_le="2026-01-02T00:00:00+00:00",
+        date_depart="2026-07-01",
+        date_retour=None,
+        prix_cents=60000,
+        devise="CAD",
+        compagnie="Test Air",
+        escales=1,
+    )
+
+    lignes = storage.lire_observations()
+
+    assert len(lignes) == 2
+    assert {ligne["prix_cents"] for ligne in lignes} == {50000, 60000}
+    assert {ligne["devise"] for ligne in lignes} == {"USD", "CAD"}
+
+
+def test_lire_observations_normalise_observe_le_naif_en_utc(tmp_path, monkeypatch) -> None:
+    """Regression : les observations anterieures au fix 1.6 (horodatage UTC
+    systematique depuis) peuvent avoir un observe_le naif, ex. migrees depuis
+    l'ancien data/history.csv. detection.echantillon_comparable compare
+    observe_le a un datetime UTC-aware et levait TypeError avant ce fix."""
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    conn = storage.obtenir_connexion()
+    route_id = storage.obtenir_ou_creer_route(conn, "YUL", "CDG")
+    storage.inserer_observation(
+        conn,
+        route_id=route_id,
+        observe_le="2026-01-01 14:30",
+        date_depart="2026-06-01",
+        date_retour=None,
+        prix_cents=50000,
+        devise="USD",
+        compagnie="Test Air",
+        escales=0,
+    )
+    conn.commit()
+    conn.close()
+
+    lignes = storage.lire_observations()
+
+    assert lignes[0]["observe_le"] == "2026-01-01T14:30:00+00:00"
+
+
+# ---------------------------------------------------------------- horizon_jours
+
+
+def test_horizon_jours_calcule_la_difference_en_jours() -> None:
+    assert storage.horizon_jours("2026-01-01T00:00:00+00:00", "2026-01-11") == 10
+
+
+def test_horizon_jours_ignore_heure_de_observe_le() -> None:
+    assert storage.horizon_jours("2026-01-01T23:59:59+00:00", "2026-01-11") == 10
+
+
+# ---------------------------------------------------------------- obtenir_derniere_alerte / enregistrer_alerte
+
+
+def test_obtenir_derniere_alerte_absente_retourne_none(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    assert storage.obtenir_derniere_alerte(1, "2026-06-01", "aubaine") is None
+
+
+def test_enregistrer_puis_obtenir_derniere_alerte(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+
+    storage.enregistrer_alerte(
+        route_id=1,
+        date_depart="2026-06-01",
+        type_alerte="aubaine",
+        prix_cents=42000,
+        envoyee_le="2026-01-01T00:00:00+00:00",
+    )
+
+    assert storage.obtenir_derniere_alerte(1, "2026-06-01", "aubaine") == {
+        "prix_cents": 42000,
+        "envoyee_le": "2026-01-01T00:00:00+00:00",
+    }
+
+
+def test_enregistrer_alerte_deuxieme_appel_ecrase_la_precedente(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+
+    storage.enregistrer_alerte(
+        route_id=1,
+        date_depart="2026-06-01",
+        type_alerte="aubaine",
+        prix_cents=42000,
+        envoyee_le="2026-01-01T00:00:00+00:00",
+    )
+    storage.enregistrer_alerte(
+        route_id=1,
+        date_depart="2026-06-01",
+        type_alerte="aubaine",
+        prix_cents=39000,
+        envoyee_le="2026-01-05T00:00:00+00:00",
+    )
+
+    assert storage.obtenir_derniere_alerte(1, "2026-06-01", "aubaine") == {
+        "prix_cents": 39000,
+        "envoyee_le": "2026-01-05T00:00:00+00:00",
+    }
+
+
+def test_enregistrer_alerte_types_distincts_lignes_distinctes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+
+    storage.enregistrer_alerte(
+        route_id=1,
+        date_depart="2026-06-01",
+        type_alerte="aubaine",
+        prix_cents=42000,
+        envoyee_le="2026-01-01T00:00:00+00:00",
+    )
+    storage.enregistrer_alerte(
+        route_id=1,
+        date_depart="2026-06-01",
+        type_alerte="minimum",
+        prix_cents=41000,
+        envoyee_le="2026-01-01T00:00:00+00:00",
+    )
+
+    alerte_aubaine = storage.obtenir_derniere_alerte(1, "2026-06-01", "aubaine")
+    alerte_minimum = storage.obtenir_derniere_alerte(1, "2026-06-01", "minimum")
+    assert alerte_aubaine is not None and alerte_aubaine["prix_cents"] == 42000
+    assert alerte_minimum is not None and alerte_minimum["prix_cents"] == 41000
