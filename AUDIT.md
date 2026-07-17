@@ -209,9 +209,9 @@ CREATE UNIQUE INDEX idx_dedup ON alertes (route_id, date_depart, type);
 - [x] Interim assumé : committer `data/scanner.db` depuis le workflow comme
       aujourd'hui le CSV (GitHub Actions n'a pas de disque persistant).
       Le passage à un Postgres géré est en Phase 3. Garder le SQL portable.
-- [ ] Une fois la migration validée : retirer `data/history.csv` du dépôt.
-      **En attente de confirmation explicite de l'utilisateur** (garde-fou
-      CLAUDE.md) — pas encore demandée à ce stade.
+- [x] Une fois la migration validée : retirer `data/history.csv` du dépôt.
+      Confirmation explicite obtenue de l'utilisateur avant suppression
+      (garde-fou CLAUDE.md).
 
 ### 2.3 Moteur de détection (`detection.py`, fonctions pures)
 Remplacer la médiane toutes-dates-confondues (qui ignore la saisonnalité et
@@ -483,8 +483,11 @@ retouche tous les points d'appel de `main()`).
   `data/scanner.db` contient déjà des observations (anti double-migration).
 - `scan.yml` committe désormais `data/scanner.db` au lieu de
   `data/history.csv`.
-- `data/history.csv` n'a **pas** été supprimé du dépôt : conformément à la
-  consigne reçue et au garde-fou CLAUDE.md, la suppression attend une
-  confirmation explicite de l'utilisateur, pas encore demandée à ce stade.
+- `data/history.csv` retiré du dépôt seulement après confirmation
+  explicite de l'utilisateur (garde-fou CLAUDE.md), une fois la migration
+  déjà validée par le test ET par l'exécution réelle ci-dessus. Le
+  garde-fou correspondant dans CLAUDE.md a été mis à jour en conséquence
+  (fait, pas juste "à ne pas faire tant que"). README.md : les mentions de
+  `data/history.csv` corrigées en `data/scanner.db` (3 endroits).
 - Vérifié : `ruff check`, `ruff format --check`, `mypy` et `pytest -q`
-  (45 tests) verts ; poussé sur `refactor-audit`.
+  tous verts ; poussé sur `refactor-audit`.

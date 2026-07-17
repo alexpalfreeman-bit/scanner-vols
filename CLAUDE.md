@@ -33,8 +33,10 @@ exécuter les phases dans l'ordre, cocher les cases au fur et à mesure.
   nulle part (code, tests, fixtures, messages de commit).
 - Ne JAMAIS lancer de vraies requêtes réseau (Duffel, Telegram) depuis les tests :
   tout passe par des mocks/fixtures locales.
-- Ne pas supprimer `data/history.csv` tant que la migration SQLite n'est pas
-  validée par un test de migration (mêmes totaux, mêmes lignes).
+- `data/history.csv` a été retiré du dépôt en Phase 2.2 (migration SQLite
+  validée par test + exécution réelle avec sommes de contrôle identiques,
+  confirmation explicite de l'utilisateur) : `data/scanner.db` est
+  désormais la seule source d'historique.
 - Pas de nouvelle dépendance sans justification dans le message de commit.
 - Travailler sur la branche `refactor-audit`. Ne jamais committer sur `main`.
 - Un commit atomique par bloc logique, message en français expliquant le *pourquoi*.
