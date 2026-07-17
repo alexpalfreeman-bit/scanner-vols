@@ -307,7 +307,7 @@ class FournisseurVols(Protocol):
       construite d'après le parsing actuel, utilisée par les tests du provider.
 
 ### 2.5 Alerting
-- [ ] `alerting.py` : formatage (échappement HTML systématique), envoi Telegram
+- [x] `alerting.py` : formatage (échappement HTML systématique), envoi Telegram
       avec retry léger, et **digest technique** en fin de run (nombre de routes OK /
       en erreur, fournisseurs suspendus) envoyé sur Telegram seulement si erreurs.
 
@@ -725,3 +725,90 @@ implémentation (même pratique qu'en Phase 2.3).
   `refactor-audit`. Comportement nominal inchangé côté détection/alerting/
   storage (aucune fonction Phase 1 modifiée) : seuls le fetch Duffel et son
   câblage dans `main()` ont changé.
+
+### Phase 2.5 — alerting.py (2026-07-17)
+
+Périmètre de cette session, donné explicitement par l'utilisateur :
+`alerting.py` uniquement (+ ses tests) — échappement HTML systématique
+(relocalisation propre de 1.5), envoi Telegram passant par la
+déduplication/cooldown de la Phase 2.3 (`detection.doit_alerter`), digest
+technique de fin de run. Ni câblage du nouveau moteur de détection dans
+`scanner.py`, ni retrait de l'ancienne logique — session suivante. Plan
+pressure-testé via un agent Plan dédié avant implémentation (même pratique
+qu'en Phase 2.3/2.4) ; confirmé par `git diff` en fin de session que
+`scanner.py`/`storage.py`/`config.py`/`config.yaml`/`providers/` sont restés
+intégralement inchangés sur les 4 commits de code de cette session.
+
+- **Bug trouvé et corrigé** (bloc A) : `vol['devise']` n'était pas échappé
+  dans `formater_alerte` (2 occurrences) alors que c'est une donnée
+  dynamique Duffel (`total_currency`), pas une constante interne — violait
+  la règle que le docstring de la fonction énonce lui-même. Test de
+  régression vérifié en échec avant le fix (`git stash` temporaire sur
+  `alerting.py` seul, conformément à CLAUDE.md). Introduit `_echapper()`
+  (point unique d'échappement, remplace les appels répétés à
+  `html.escape(str(x))`) et étendu aussi à `vol['prix']`/`vol['escales']`
+  pour qu'« échappement systématique » soit vrai sans exception non
+  documentée ; `stats['tendance']` reste le seul cas volontairement non
+  échappé (littéral fermé utilisé comme clé de dict — une valeur étrangère
+  lèverait `KeyError` avant l'interpolation, documenté en docstring pour
+  qu'on ne l'échappe pas « par réflexe » plus tard). Couverture de
+  `formater_alerte` étendue au passage (un seul test avant cette session,
+  branche `stats=None` uniquement) : tendance hausse/baisse/stable, stats
+  sans tendance, stats absent, aller-retour (branche jamais testée jusqu'ici).
+- **Retry léger sur `envoyer_telegram`** (bloc B.1) : backoff exponentiel +
+  jitter, `essais=3` (vs 4 chez `post_resilient`/Duffel — volume d'appels
+  Telegram par run bien plus faible qu'un appel fournisseur par
+  destination). Point technique clé : `r.raise_for_status()` vit dans le
+  `else` du `try`/`except requests.RequestException`, pour qu'un 4xx
+  non-transitoire (401, etc.) ne soit jamais retenté (`HTTPError` hérite de
+  `RequestException` — sans ce `else`, une erreur permanente aurait été
+  retentée `essais` fois pour rien). Pas de parsing `Retry-After`/
+  `parameters.retry_after` (mécanisme Telegram côté corps JSON, pas l'en-tête
+  HTTP) ni de réutilisation de `post_resilient` (aurait introduit une
+  dépendance `alerting -> providers.duffel`, hors de la séparation de
+  couches voulue : `alerting.py` ne connaît que `providers.base`).
+- **`envoyer_alerte`** (bloc B.2) : nouvelle fonction composite (formate +
+  décide via `doit_alerter` + envoie), conformément à l'architecture cible
+  de CLAUDE.md qui assigne explicitement la déduplication à `alerting.py`
+  (pas à `scanner.py`). `date_depart` dérivé de `route["date_depart"]` (pas
+  un paramètre séparé, pour éviter une 3e source de vérité sur la même
+  donnée) ; `prix_cents` reste un paramètre indépendant de `vol["prix"]`,
+  non revalidé contre lui — même précédent que `alerte_precedente` dans
+  `doit_alerter` (CLAUDE.md : ne pas valider l'invalidable). Ne catch aucune
+  exception (`ValueError` horloge naïve, erreurs Telegram) : cette politique
+  reste la responsabilité de `scanner.py`, pas dupliquée ici. **Pas câblée
+  dans `scanner.py` cette session** — testée uniquement avec des fixtures
+  synthétiques, comme `doit_alerter` lui-même en Phase 2.3.
+- **Digest technique** (bloc C) : `digest_necessaire`/`formater_digest`/
+  `envoyer_digest`, consomment `ResumeFournisseur` (`providers/base.py`,
+  déjà conçu en Phase 2.4 pour ce digest). Déclenché par route en erreur
+  (même convention que `scanner.py::ecrire_resume_github`,
+  `resultat.startswith("ERREUR")`) OU fournisseur suspendu OU taux de
+  réponses « 0 offre » anormal — ce dernier cas n'est pas une extrapolation :
+  le Journal Phase 2.4 décrit le log GitHub Actions comme « seul filet de
+  sécurité réel en l'absence du digest », ce digest devient ce filet.
+  `SEUIL_TAUX_ZERO_OFFRES`/`APPELS_REUSSIS_MIN_POUR_AVERTISSEMENT` dupliqués
+  localement plutôt qu'importés de `providers/duffel.py` (`providers/base.py`
+  documente que le digest doit rester générique via `ResumeFournisseur`, pas
+  couplé à un fournisseur concret — un futur 2e fournisseur Amadeus doit
+  fonctionner sans changement ici). Message plafonné à
+  `MAX_ROUTES_ERREUR_AFFICHEES` (20) routes, chaque détail d'erreur
+  **échappé puis tronqué** à `MAX_LONGUEUR_DETAIL_ERREUR` (100 — dans cet
+  ordre précis, pour que la longueur affichée reste bornée même si
+  l'échappement allonge le texte, ex. `<` → `&lt;`) : un détail peut
+  contenir du HTML brut venant d'`extraire_message_erreur` sur un 502
+  (`r.text[:200]`). Vérifié concrètement sous la limite Telegram de 4096
+  caractères sur un scénario pathologique à 50 routes en erreur avec
+  détails longs (2822 caractères mesurés). **Pas câblée dans `scanner.py`
+  cette session.**
+- Tests : 42 tests neufs dans `tests/test_alerting.py` (3 → 45 dans ce
+  fichier, 192 pour la suite complète). Aucun accès réseau réel :
+  `@patch("alerting.requests.post")` / mocks de
+  `alerting.envoyer_telegram`/`alerting.doit_alerter`, `monkeypatch` sur
+  `alerting.time.sleep`/`alerting.random.uniform` (mirroir exact des
+  patterns déjà en place dans `tests/test_providers.py`).
+- Vérifié : `ruff check`, `ruff format --check`, `mypy` et `pytest -q` tous
+  verts (192 tests) après chaque commit ; poussé sur `refactor-audit`.
+  Comportement nominal du scanner inchangé (aucun fichier hors
+  `alerting.py`/`tests/test_alerting.py` modifié, rien de nouveau câblé dans
+  `main()`).
