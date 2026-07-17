@@ -6,11 +6,16 @@ un message explicite plutot qu'un KeyError/ValidationError brut.
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
+import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+BASE_DIR = Path(__file__).parent
+CONFIG_FILE = BASE_DIR / "config.yaml"
 
 
 class ErreurConfiguration(Exception):
@@ -38,6 +43,11 @@ def charger_env() -> Env:
 
 
 # ---------------------------------------------------------------- config.yaml
+
+
+def charger_config() -> dict:
+    with open(CONFIG_FILE, encoding="utf-8") as f:
+        return cast(dict, yaml.safe_load(f))
 
 
 class Destination(BaseModel):
