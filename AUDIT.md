@@ -812,3 +812,112 @@ intégralement inchangés sur les 4 commits de code de cette session.
   Comportement nominal du scanner inchangé (aucun fichier hors
   `alerting.py`/`tests/test_alerting.py` modifié, rien de nouveau câblé dans
   `main()`).
+
+### Câblage go-live — Session A (2026-07-17)
+
+Session de câblage final découpée en 2 avec l'utilisateur (proposé par
+Claude Code, validé avant implémentation via un plan détaillé — même
+pratique que 2.3/2.4/2.5, avec un agent Plan dédié pressure-testant le
+design avant présentation) : **Session A** (cette session) branche la
+plomberie `storage.py` nécessaire au nouveau moteur, retire le shim
+Offre→dict de la Phase 2.4, et fait tourner `echantillon_comparable` →
+`classifier` **en mode observation seulement** (loggé en INFO, aucune
+alerte ni comportement visible ne change — `prix_max`/`est_nouveau_minimum`/
+l'ancien bloc bonne-affaire continuent exactement comme avant). **Session
+B** (prochaine session) câblera réellement `classifier()` →
+`envoyer_alerte`/corroboration/`envoyer_digest` et retirera le code mort.
+Décisions déjà validées avec l'utilisateur pour cette Session B future (à
+appliquer alors) :
+1. jusqu'à **3 messages Telegram indépendants** par route (seuil fixe /
+   nouveau minimum / aubaine-ou-erreur_prix), chacun avec son propre
+   dédup-cooldown via `envoyer_alerte` — pas de fusion en un seul message,
+   pour rester fidèle au schéma `alertes` (une ligne = un type) et à
+   `envoyer_alerte` tel que construit en 2.5 (composite mono-type) ;
+2. `corroboration_activee` **désactivé par défaut** dans `config.yaml` —
+   mécanisme jamais éprouvé contre du trafic réel, `candidat_erreur_prix`
+   redescend en "aubaine" tant qu'il n'est pas activé manuellement ;
+3. signaux 3 (plancher absolu — aucune config de plancher par région
+   n'existe) et 4 (vitesse de chute — définition de "dernier prix observé"
+   ambiguë vu la rotation des dates) de la corroboration laissés non
+   câblés ; seuls les signaux 1 (re-requête) et 2 (dates voisines) le
+   seront.
+
+- **storage.py** : `_horizon_jours` promue publique (`horizon_jours`,
+  utilisée aussi par `scanner.py`). `lire_observations()` (nouvelle) :
+  lecture native `prix_cents`/`route_id` sans jointure, un seul fetch avant
+  la boucle des routes — même pattern que `lire_historique()`, à la même
+  échelle (~100 lignes) ; `echantillon_comparable` filtre lui-même par
+  route_id/devise/récence sur la liste complète. `enregistrer_observation`
+  (nouvelle) remplace `ajouter_historique` (retirée, devenue 100 % morte —
+  vérifié que `migrer_csv.py` appelle `obtenir_ou_creer_route`/
+  `inserer_observation` directement, jamais `ajouter_historique`) : centimes
+  natifs, plus d'aller-retour par les dollars flottants, retourne
+  `route_id`. `lire_historique` (dollars) intouchée : encore utilisée par
+  `detection.statistiques_destination` (Phase 1, conservée cette session
+  comme signal complémentaire, cf. consigne utilisateur). `obtenir_derniere_alerte`/
+  `enregistrer_alerte` (nouvelles, upsert `ON CONFLICT ... DO UPDATE` sur
+  `idx_dedup` — pas `DO NOTHING` comme `routes` : une ré-alerte légitime
+  après cooldown doit écraser la ligne précédente) ajoutées mais **pas
+  encore consommées** cette session (Session B) — testées directement,
+  même pratique que `envoyer_alerte`/`envoyer_digest` en 2.5 avant leur
+  câblage.
+- **scanner.py** : `_vol_depuis_offre` retiré. Chaque site Phase 1 lit
+  `offre.prix_cents`/`offre.devise`/etc. directement ; un seul dict `vol`
+  local reconstruit juste avant `formater_alerte` (seul site encore
+  demandeur d'un vrai dict, signature `alerting.py` non touchée cette
+  session), plus threadé dans tout le pipeline comme le faisait l'ancien
+  shim. Un seul appel horloge par route : `horodatage_maintenant()` (déjà
+  existant, inchangé) puis `maintenant = datetime.fromisoformat(horodatage)`
+  plutôt qu'un second `datetime.now(UTC)` — garantit aussi `maintenant`
+  tz-aware (requis par `echantillon_comparable`) sans toucher le mock
+  existant sur `scanner.datetime`. Mode observation ajouté juste après
+  `enregistrer_observation` : `horizon_jours` → `echantillon_comparable` →
+  `classifier`, résultat loggé en INFO (`niveau`/`n` inclus), aucune branche
+  dessus (ni alerte, ni corroboration, ni écriture dans `alertes`).
+- **Bug réel trouvé et corrigé pendant la vérification en conditions
+  réelles** (hors périmètre initial, mais bloquant dès le premier run) :
+  `data/scanner.db` contient des `observe_le` naïfs (observations
+  antérieures au fix 1.6 — horodatage UTC systématique depuis —, migrées
+  depuis l'ancien `data/history.csv` qui mélangeait déjà les deux formats,
+  cf. Journal 2.2). Aucun code existant ne parsait jamais `observe_le` en
+  `datetime` (Phase 1 ne fait qu'un tri de chaînes) : `echantillon_comparable`
+  est le tout premier appelant à le comparer à un `datetime` UTC-aware, ce
+  qui a levé `TypeError: can't compare offset-naive and offset-aware
+  datetimes` au tout premier run réel contre le vrai `data/scanner.db` (pas
+  dans les tests, qui n'utilisent que des fixtures synthétiques déjà
+  propres). Corrigé à la frontière `storage.lire_observations()`
+  (`_observe_le_normalise` : un naïf est réinterprété en UTC explicite,
+  jamais une autre zone, conformément à la convention CLAUDE.md — tout
+  timestamp du projet représente déjà l'UTC) plutôt que dans `detection.py`,
+  qui reste pur et gelé. Test de régression ajouté et vérifié en échec
+  avant le fix (`test_lire_observations_normalise_observe_le_naif_en_utc`).
+- Tests : 11 tests neufs dans `tests/test_storage.py` (retarget des 4
+  tests round-trip `ajouter_historique` → `enregistrer_observation`, ajout
+  `lire_observations`/`horizon_jours`/`obtenir_derniere_alerte`/
+  `enregistrer_alerte`/régression naïf) et 1 nouveau dans
+  `tests/test_scanner.py` (preuve que le mode observation loggue une vraie
+  classification `candidat_erreur_prix` contre un échantillon synthétique à
+  8 observations avec dispersion réelle — pas juste `donnees_insuffisantes`
+  par défaut) ; les 4 tests existants de `main()` gardent leurs assertions
+  (mocks `statistiques_destination=None`/`lire_observations=[]` →
+  `classifier` résout systématiquement en `donnees_insuffisantes`), seuls
+  leurs `@patch` changent (`ajouter_historique` → `enregistrer_observation`
+  + nouveau `lire_observations`).
+- Vérifié : `ruff check`, `ruff format --check`, `mypy` et `pytest -q` tous
+  verts (204 tests, 192 + 12) ; **2 runs locaux réels** (`python scanner.py`,
+  37 destinations + canari, contre le vrai `data/scanner.db`) confirment
+  qu'aucune alerte n'a été envoyée et que le comportement `prix_max`/
+  `est_nouveau_minimum`/bloc actuel est inchangé, et montrent la ligne
+  `classification z-score = donnees_insuffisantes (niveau=route, n=5|6)`
+  pour chaque route — confirmation empirique de la prédiction de
+  l'utilisateur (n réel de 5-6 par route, sous `n_min=8`, cohérent avec "le
+  z-score renverra donnees_insuffisantes presque partout pendant des
+  semaines"). Repli systématique au niveau "route" observé (jamais
+  "route_mois_horizon"/"route_mois") : attendu, la fenêtre de comparaison
+  n'a pas encore assez de recul avec si peu d'observations par route.
+  Note d'environnement (hors code, sans rapport avec cette session) :
+  `venv/Scripts/pytest.exe` de ce dépôt résout vers l'interpréteur Python
+  système au lieu de celui du venv (reproduit identiquement en PowerShell
+  et en bash, sur des fichiers de test non touchés cette session) —
+  contourné via `python -m pytest`, qui utilise le bon interpréteur ;
+  `ruff`/`mypy` ne sont pas affectés.
