@@ -11,6 +11,7 @@ extraction (AUDIT.md 2.4) - un changement de schema cote Duffel leve
 ErreurValidationReponse au lieu de produire silencieusement une Offre fausse.
 """
 
+import logging
 import random
 import time
 from decimal import ROUND_HALF_UP, Decimal
@@ -19,12 +20,21 @@ import requests
 from pydantic import BaseModel, ConfigDict, Field
 
 from config import Env
-from providers.base import ErreurFournisseur, ErreurValidationReponse, Offre, Route
+from providers.base import (
+    ErreurFournisseur,
+    ErreurFournisseurSuspendu,
+    ErreurValidationReponse,
+    Offre,
+    Route,
+)
+
+logger = logging.getLogger(__name__)
 
 DUFFEL_API_URL = "https://api.duffel.com"
 DUFFEL_VERSION = "v2"
 
 RETRIABLES = {429, 500, 502, 503, 504}
+ECHECS_CONSECUTIFS_MAX = 5
 
 
 def creer_session_duffel(env: Env) -> requests.Session:
@@ -150,9 +160,33 @@ class FournisseurDuffel:
     def __init__(self, env: Env, config: dict, *, session: requests.Session | None = None) -> None:
         self._session = session or creer_session_duffel(env)
         self._config = config
+        self._echecs_consecutifs = 0  # remis a 0 a chaque succes -> pilote le circuit breaker
+        self._echecs_cumules = 0  # jamais remis a 0 -> pilote resume().echecs_total
+        self._suspendu = False
 
     def meilleure_offre(self, route: Route) -> Offre | None:
-        return self._appeler(route)
+        """Circuit breaker (AUDIT.md 2.4) : suspend le fournisseur pour le
+        reste du run apres ECHECS_CONSECUTIFS_MAX echecs d'affilee. Une fois
+        suspendu, aucun appel reseau n'est tente : leve immediatement."""
+        if self._suspendu:
+            raise ErreurFournisseurSuspendu(
+                f"{self.nom} suspendu apres {ECHECS_CONSECUTIFS_MAX} echecs consecutifs"
+            )
+        try:
+            offre = self._appeler(route)
+        except ErreurFournisseur:
+            self._echecs_consecutifs += 1
+            self._echecs_cumules += 1
+            if self._echecs_consecutifs >= ECHECS_CONSECUTIFS_MAX:
+                self._suspendu = True
+                logger.warning(
+                    "%s : suspendu pour le reste du run (%d echecs consecutifs)",
+                    self.nom,
+                    self._echecs_consecutifs,
+                )
+            raise
+        self._echecs_consecutifs = 0
+        return offre
 
     def _appeler(self, route: Route) -> Offre | None:
         """Note (audit 1.9) : la doc Duffel v2 confirme que

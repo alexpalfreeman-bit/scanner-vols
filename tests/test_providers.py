@@ -7,7 +7,12 @@ import pytest
 
 from config import Env
 from providers import duffel
-from providers.base import ErreurFournisseur, ErreurValidationReponse, Offre
+from providers.base import (
+    ErreurFournisseur,
+    ErreurFournisseurSuspendu,
+    ErreurValidationReponse,
+    Offre,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -249,3 +254,72 @@ def test_http_non_ok_leve_erreur_fournisseur() -> None:
 )
 def test_centimes_depuis_montant(montant: Decimal, attendu: int) -> None:
     assert duffel._centimes_depuis_montant(montant) == attendu
+
+
+# ---------------------------------------------------------------- circuit breaker (2.4)
+
+
+def test_circuit_breaker_suspend_apres_5_echecs_consecutifs(monkeypatch) -> None:
+    monkeypatch.setattr(duffel, "post_resilient", Mock(side_effect=RuntimeError("boom")))
+    fournisseur = _fournisseur(Mock())
+
+    for _ in range(5):
+        with pytest.raises(ErreurFournisseur):
+            fournisseur.meilleure_offre(_route())
+
+    assert fournisseur._suspendu is True
+
+
+def test_circuit_breaker_sous_le_seuil_ne_suspend_pas(monkeypatch) -> None:
+    monkeypatch.setattr(duffel, "post_resilient", Mock(side_effect=RuntimeError("boom")))
+    fournisseur = _fournisseur(Mock())
+
+    for _ in range(4):
+        with pytest.raises(ErreurFournisseur):
+            fournisseur.meilleure_offre(_route())
+
+    assert fournisseur._suspendu is False
+
+
+def test_circuit_breaker_aucun_appel_reseau_une_fois_suspendu(monkeypatch) -> None:
+    post_resilient_mock = Mock(side_effect=RuntimeError("boom"))
+    monkeypatch.setattr(duffel, "post_resilient", post_resilient_mock)
+    fournisseur = _fournisseur(Mock())
+    for _ in range(5):
+        with pytest.raises(ErreurFournisseur):
+            fournisseur.meilleure_offre(_route())
+    appels_avant = post_resilient_mock.call_count
+
+    with pytest.raises(ErreurFournisseurSuspendu):
+        fournisseur.meilleure_offre(_route())
+
+    assert post_resilient_mock.call_count == appels_avant
+
+
+def test_circuit_breaker_reset_apres_succes_intercale(monkeypatch) -> None:
+    fixture = json.loads((FIXTURES / "duffel_offer_request.json").read_text(encoding="utf-8"))
+    post_resilient_mock = Mock(
+        side_effect=[
+            RuntimeError("boom"),
+            RuntimeError("boom"),
+            RuntimeError("boom"),
+            RuntimeError("boom"),
+            _reponse_mock(fixture),
+            RuntimeError("boom"),
+            RuntimeError("boom"),
+            RuntimeError("boom"),
+            RuntimeError("boom"),
+        ]
+    )
+    monkeypatch.setattr(duffel, "post_resilient", post_resilient_mock)
+    fournisseur = _fournisseur(Mock())
+
+    for _ in range(4):
+        with pytest.raises(ErreurFournisseur):
+            fournisseur.meilleure_offre(_route())
+    fournisseur.meilleure_offre(_route())  # succes -> reset le compteur consecutif
+    for _ in range(4):
+        with pytest.raises(ErreurFournisseur):
+            fournisseur.meilleure_offre(_route())
+
+    assert fournisseur._suspendu is False
