@@ -27,7 +27,7 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["scanner", "config", "storage", "detection", "alerting"]
+py-modules = ["scanner", "config", "storage", "detection", "alerting", "migrer_csv"]
 packages = ["providers"]
 
 [tool.ruff]
@@ -44,7 +44,15 @@ quote-style = "double"
 [tool.mypy]
 plugins = ["pydantic.mypy"]
 python_version = "3.12"
-files = ["scanner.py", "config.py", "storage.py", "detection.py", "alerting.py", "providers"]
+files = [
+  "scanner.py",
+  "config.py",
+  "storage.py",
+  "detection.py",
+  "alerting.py",
+  "migrer_csv.py",
+  "providers",
+]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 check_untyped_defs = true
