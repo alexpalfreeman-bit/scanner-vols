@@ -97,7 +97,7 @@ def post_resilient(session: requests.Session, url: str, corps: dict,
 **Tests** (réseau mocké) : 429 avec `Retry-After` → attente respectée puis succès ;
 4 échecs consécutifs → exception remontée ; 404 → retour immédiat sans retry.
 
-### 1.5 Injection HTML dans Telegram
+### 1.5 Injection HTML dans Telegram ✅
 **Problème** : `parse_mode=HTML` sans échappement des champs dynamiques
 (compagnie, etc.) → un `&` ou `<` casse le message et l'alerte est perdue.
 **Correctif** : `html.escape()` sur toute valeur interpolée dans le message.

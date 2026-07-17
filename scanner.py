@@ -25,6 +25,7 @@ et fait planter silencieusement le parsing des offres).
 """
 
 import csv
+import html
 import io
 import os
 import random
@@ -338,8 +339,21 @@ def raison_prix_max(
 
 
 def formater_alerte(route: dict, vol: dict, raisons: list[str], stats: dict | None) -> str:
+    """Construit le message Telegram (parse_mode=HTML). Toute valeur qui ne
+    vient pas d'une constante interne (compagnie, codes, raisons...) est
+    passee par html.escape() : un "&" ou "<" dans un nom de compagnie ne doit
+    jamais casser le message ni etre interprete comme du HTML."""
     escales = "direct" if vol["escales"] == 0 else f"{vol['escales']} escale(s)"
-    retour = f" → retour {route['date_retour']}" if route.get("date_retour") else " (aller simple)"
+    retour = (
+        f" → retour {html.escape(str(route['date_retour']))}"
+        if route.get("date_retour")
+        else " (aller simple)"
+    )
+    origine = html.escape(str(route["origine"]))
+    destination = html.escape(str(route["destination"]))
+    date_depart = html.escape(str(route["date_depart"]))
+    compagnie = html.escape(str(vol["compagnie"]))
+    raisons_texte = html.escape(" + ".join(raisons))
 
     if stats and stats["tendance"]:
         emoji = {"hausse": "📈", "baisse": "📉", "stable": "➡️"}[stats["tendance"]]
@@ -353,10 +367,10 @@ def formater_alerte(route: dict, vol: dict, raisons: list[str], stats: dict | No
         ligne_tendance = "ℹ️ Première observation pour cette destination"
 
     return (
-        f"✈️ <b>ALERTE PRIX — {route['origine']} → {route['destination']}</b>\n"
-        f"📅 Départ {route['date_depart']}{retour}\n"
-        f"💰 <b>{vol['prix']} {vol['devise']}</b> ({vol['compagnie']}, {escales})\n"
-        f"🎯 {' + '.join(raisons)}\n"
+        f"✈️ <b>ALERTE PRIX — {origine} → {destination}</b>\n"
+        f"📅 Départ {date_depart}{retour}\n"
+        f"💰 <b>{vol['prix']} {vol['devise']}</b> ({compagnie}, {escales})\n"
+        f"🎯 {raisons_texte}\n"
         f"{ligne_tendance}"
     )
 
