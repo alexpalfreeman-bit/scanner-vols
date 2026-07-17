@@ -1,3 +1,5 @@
+import logging
+from datetime import UTC, datetime
 from unittest.mock import Mock, patch
 
 import pytest
@@ -184,3 +186,110 @@ def test_envoyer_telegram_4xx_non_transitoire_pas_de_retry(post_mock, monkeypatc
         alerting.envoyer_telegram("un message", _env())
 
     assert post_mock.call_count == 1
+
+
+# ---------------------------------------------------------------- envoyer_alerte (2.5, gate 2.3.d)
+
+MAINTENANT_ENVOI = datetime(2026, 7, 3, tzinfo=UTC)
+
+
+def _alerte_precedente(
+    *,
+    route_id: int = 1,
+    date_depart: str = "2026-09-01",
+    type_alerte: str = "erreur_prix",
+    prix_cents: int = 50_000,
+    envoyee_le: str = "2026-07-01T00:00:00+00:00",
+) -> dict:
+    return {
+        "route_id": route_id,
+        "date_depart": date_depart,
+        "type": type_alerte,
+        "prix_cents": prix_cents,
+        "envoyee_le": envoyee_le,
+    }
+
+
+def _parametres_envoyer_alerte(**overrides: object) -> dict:
+    base: dict = {
+        "route": _route(date_depart="2026-09-01"),
+        "vol": _vol(),
+        "raisons": ["bonne affaire"],
+        "stats": None,
+        "route_id": 1,
+        "type_alerte": "erreur_prix",
+        "prix_cents": 45_000,
+        "alerte_precedente": None,
+        "maintenant": MAINTENANT_ENVOI,
+        "env": _env(),
+    }
+    base.update(overrides)
+    return base
+
+
+@patch("alerting.envoyer_telegram")
+def test_envoyer_alerte_aucune_alerte_precedente_envoie(telegram_mock) -> None:
+    resultat = alerting.envoyer_alerte(**_parametres_envoyer_alerte(alerte_precedente=None))
+
+    assert resultat is True
+    telegram_mock.assert_called_once()
+
+
+@patch("alerting.envoyer_telegram")
+def test_envoyer_alerte_dans_cooldown_prix_pas_assez_bas_supprime(telegram_mock) -> None:
+    precedente = _alerte_precedente(prix_cents=50_000)  # envoyee il y a 48h < cooldown 72h
+
+    resultat = alerting.envoyer_alerte(
+        **_parametres_envoyer_alerte(alerte_precedente=precedente, prix_cents=48_000)
+    )  # 96% de l'ancien prix : pas assez bas pour casser le cooldown
+
+    assert resultat is False
+    telegram_mock.assert_not_called()
+
+
+@patch("alerting.envoyer_telegram")
+def test_envoyer_alerte_dans_cooldown_prix_nettement_plus_bas_envoie(telegram_mock) -> None:
+    precedente = _alerte_precedente(prix_cents=50_000)
+
+    resultat = alerting.envoyer_alerte(
+        **_parametres_envoyer_alerte(alerte_precedente=precedente, prix_cents=40_000)
+    )  # 80% de l'ancien prix : casse le cooldown
+
+    assert resultat is True
+    telegram_mock.assert_called_once()
+
+
+@patch("alerting.envoyer_telegram")
+@patch("alerting.doit_alerter")
+def test_envoyer_alerte_derive_date_depart_depuis_route(doit_alerter_mock, telegram_mock) -> None:
+    doit_alerter_mock.return_value = True
+    route = _route(date_depart="2026-11-20")
+
+    alerting.envoyer_alerte(**_parametres_envoyer_alerte(route=route))
+
+    assert doit_alerter_mock.call_args.kwargs["date_depart"] == "2026-11-20"
+
+
+def test_envoyer_alerte_propage_exception_horloge_naive() -> None:
+    with pytest.raises(ValueError):
+        alerting.envoyer_alerte(**_parametres_envoyer_alerte(maintenant=datetime(2026, 7, 3)))
+
+
+@patch("alerting.envoyer_telegram")
+def test_envoyer_alerte_propage_exception_telegram(telegram_mock) -> None:
+    telegram_mock.side_effect = RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        alerting.envoyer_alerte(**_parametres_envoyer_alerte())
+
+
+@patch("alerting.envoyer_telegram")
+def test_envoyer_alerte_log_info_quand_supprimee(telegram_mock, caplog) -> None:
+    precedente = _alerte_precedente(prix_cents=50_000)
+
+    with caplog.at_level(logging.INFO, logger="alerting"):
+        alerting.envoyer_alerte(
+            **_parametres_envoyer_alerte(alerte_precedente=precedente, prix_cents=48_000)
+        )
+
+    assert "alerte supprimee" in caplog.text

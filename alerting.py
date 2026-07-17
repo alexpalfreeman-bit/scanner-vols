@@ -5,12 +5,17 @@ Formatage (echappement HTML systematique) et envoi des messages d'alerte.
 """
 
 import html
+import logging
 import random
 import time
+from datetime import datetime
 
 import requests
 
 from config import Env
+from detection import TypeAlerte, doit_alerter
+
+logger = logging.getLogger(__name__)
 
 # Mirroir volontairement decouple de providers/duffel.py::RETRIABLES : alerting.py
 # ne doit dependre que de providers.base (contrat generique), jamais d'un
@@ -109,3 +114,63 @@ def formater_alerte(route: dict, vol: dict, raisons: list[str], stats: dict | No
         f"🎯 {raisons_texte}\n"
         f"{ligne_tendance}"
     )
+
+
+# ---------------------------------------------------------------- envoyer_alerte (2.5, gate 2.3.d)
+
+
+def envoyer_alerte(
+    *,
+    route: dict,
+    vol: dict,
+    raisons: list[str],
+    stats: dict | None,
+    route_id: int,
+    type_alerte: TypeAlerte,
+    prix_cents: int,
+    alerte_precedente: dict | None,
+    maintenant: datetime,
+    env: Env,
+    cooldown_heures: float = 72.0,
+    ratio_reduction_min: float = 0.90,
+) -> bool:
+    """Envoie l'alerte seulement si detection.doit_alerter l'autorise (dedup/
+    cooldown, AUDIT.md 2.3d) : compose la decision (doit_alerter), le
+    formatage (formater_alerte) et l'envoi (envoyer_telegram). Retourne True
+    si un message a ete envoye, False s'il a ete supprime par le cooldown.
+
+    Ne catch aucune exception (ValueError de doit_alerter sur horloge naive,
+    erreurs reseau/HTTP de envoyer_telegram) : les laisse remonter, comme
+    aujourd'hui scanner.py gere deja ses propres try/except autour de
+    l'envoi - cette politique reste dans scanner.py, pas dupliquee ici.
+
+    prix_cents doit correspondre a vol["prix"] en centimes entiers ; comme
+    alerte_precedente dans doit_alerter, ce n'est pas revalide ici (parametre
+    documentaire, l'appelant est repute coherent - CLAUDE.md, ne pas valider
+    l'invalidable). date_depart n'est pas un parametre separe : derive de
+    route["date_depart"] pour eviter une 3e source de verite sur la meme
+    donnee.
+
+    Pas encore appelee par scanner.py (cablage : session suivante) - testee
+    ici uniquement avec des fixtures synthetiques, comme detection.doit_alerter
+    lui-meme en Phase 2.3."""
+    date_depart = route["date_depart"]
+    if not doit_alerter(
+        route_id=route_id,
+        date_depart=date_depart,
+        type_alerte=type_alerte,
+        prix_cents=prix_cents,
+        alerte_precedente=alerte_precedente,
+        maintenant=maintenant,
+        cooldown_heures=cooldown_heures,
+        ratio_reduction_min=ratio_reduction_min,
+    ):
+        logger.info(
+            "route_id=%s date_depart=%s type=%s : alerte supprimee (dedup/cooldown)",
+            route_id,
+            date_depart,
+            type_alerte,
+        )
+        return False
+    envoyer_telegram(formater_alerte(route, vol, raisons, stats), env)
+    return True
