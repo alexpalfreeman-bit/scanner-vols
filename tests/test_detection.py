@@ -301,3 +301,111 @@ def test_echantillon_comparable_override_fenetre_historique_mois() -> None:
 def test_echantillon_comparable_maintenant_naif_leve_erreur() -> None:
     with pytest.raises(ValueError):
         _echantillon([], maintenant=datetime(2026, 7, 1))
+
+
+# ---------------------------------------------------------------- z_score_modifie (2.3.b)
+
+# median=45.0, MAD=20.0 (calcule a la main, voir plan).
+_ECHANTILLON_MAD_CONNU = [10, 20, 30, 40, 50, 60, 70, 80]
+
+
+def test_z_score_modifie_echantillon_insuffisant() -> None:
+    assert detection.z_score_modifie(500, [100] * 7) is None
+
+
+def test_z_score_modifie_n_min_frontiere_8_calcule() -> None:
+    assert detection.z_score_modifie(45, _ECHANTILLON_MAD_CONNU) is not None
+
+
+def test_z_score_modifie_mad_nulle_retourne_none() -> None:
+    assert detection.z_score_modifie(999, [500] * 8) is None
+
+
+def test_z_score_modifie_ordre_sans_effet() -> None:
+    trie = sorted(_ECHANTILLON_MAD_CONNU)
+    melange = [40, 10, 80, 20, 70, 30, 60, 50]
+    assert detection.z_score_modifie(10, trie) == detection.z_score_modifie(10, melange)
+
+
+def test_z_score_modifie_avec_doublons() -> None:
+    # median=75.0, MAD=25.0 (calcule a la main) : le median/MAD gerent les
+    # doublons sans traitement special, mais autant le verifier explicitement.
+    echantillon = [50, 50, 50, 50, 100, 100, 100, 100]
+    assert detection.z_score_modifie(50, echantillon) == pytest.approx(-0.6745)
+
+
+def test_z_score_modifie_valeur_calculee_signe_negatif() -> None:
+    z = detection.z_score_modifie(10, _ECHANTILLON_MAD_CONNU)
+    assert z == pytest.approx(-1.180375)
+
+
+def test_z_score_modifie_valeur_calculee_signe_positif() -> None:
+    z = detection.z_score_modifie(90, _ECHANTILLON_MAD_CONNU)
+    assert z == pytest.approx(1.517625)
+
+
+def test_z_score_modifie_prix_egal_mediane_z_zero() -> None:
+    assert detection.z_score_modifie(45, _ECHANTILLON_MAD_CONNU) == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------- classifier (2.3.b)
+
+
+def test_classifier_donnees_insuffisantes() -> None:
+    assert detection.classifier(500, [100] * 3) == "donnees_insuffisantes"
+
+
+def test_classifier_frontiere_erreur_prix_exacte(monkeypatch) -> None:
+    monkeypatch.setattr(detection, "z_score_modifie", lambda *a, **k: -3.5)
+    assert detection.classifier(1, [1] * 8) == "candidat_erreur_prix"
+
+
+def test_classifier_juste_au_dessus_frontiere_erreur_prix(monkeypatch) -> None:
+    monkeypatch.setattr(detection, "z_score_modifie", lambda *a, **k: -3.4999)
+    assert detection.classifier(1, [1] * 8) == "bonne_affaire"
+
+
+def test_classifier_frontiere_bonne_affaire_exacte(monkeypatch) -> None:
+    monkeypatch.setattr(detection, "z_score_modifie", lambda *a, **k: -2.0)
+    assert detection.classifier(1, [1] * 8) == "bonne_affaire"
+
+
+def test_classifier_juste_au_dessus_frontiere_bonne_affaire(monkeypatch) -> None:
+    monkeypatch.setattr(detection, "z_score_modifie", lambda *a, **k: -1.9999)
+    assert detection.classifier(1, [1] * 8) == "normal"
+
+
+def test_classifier_z_none_donnees_insuffisantes(monkeypatch) -> None:
+    monkeypatch.setattr(detection, "z_score_modifie", lambda *a, **k: None)
+    assert detection.classifier(1, [1] * 8) == "donnees_insuffisantes"
+
+
+def test_classifier_moins_25_pourcent_bonne_affaire() -> None:
+    # median=47000, MAD=3000 (verifie par calcul). -25% vs la mediane -> z ~ -2.64.
+    echantillon = [40000, 44000, 44000, 46000, 48000, 50000, 50000, 54000]
+    assert detection.classifier(35250, echantillon) == "bonne_affaire"
+
+
+def test_classifier_outlier_net_candidat_erreur_prix() -> None:
+    # Meme echantillon, -60% vs la mediane -> z ~ -6.34.
+    echantillon = [40000, 44000, 44000, 46000, 48000, 50000, 50000, 54000]
+    assert detection.classifier(18800, echantillon) == "candidat_erreur_prix"
+
+
+def test_classifier_override_seuil_affaire(monkeypatch) -> None:
+    monkeypatch.setattr(detection, "z_score_modifie", lambda *a, **k: -1.0)
+    assert detection.classifier(1, [1] * 8) == "normal"
+    assert detection.classifier(1, [1] * 8, seuil_affaire_z=-0.5) == "bonne_affaire"
+
+
+def test_classifier_override_seuil_erreur(monkeypatch) -> None:
+    monkeypatch.setattr(detection, "z_score_modifie", lambda *a, **k: -2.5)
+    assert detection.classifier(1, [1] * 8) == "bonne_affaire"
+    assert detection.classifier(1, [1] * 8, seuil_erreur_z=-2.0) == "candidat_erreur_prix"
+
+
+def test_classifier_n_min_est_transmis_a_z_score_modifie() -> None:
+    # n_min ici et dans echantillon_comparable ne sont couples que par
+    # convention (decision documentee) : un n_min desaccorde reste correct,
+    # juste degrade (repli qui n'atteint plus le seuil que classifier exige).
+    assert detection.classifier(10, _ECHANTILLON_MAD_CONNU, n_min=9) == "donnees_insuffisantes"

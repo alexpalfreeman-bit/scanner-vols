@@ -193,3 +193,42 @@ def echantillon_comparable(
         if len(lignes) >= n_min:
             return EchantillonComparable(niveau, tuple(o["prix_cents"] for o in lignes))
     return EchantillonComparable("route", tuple(o["prix_cents"] for o in base))
+
+
+# ---------------------------------------------------------------- z_score_modifie / classifier (2.3.b)
+
+
+def z_score_modifie(
+    prix_cents: int, echantillon_cents: Sequence[int], *, n_min: int = 8
+) -> float | None:
+    """Z-score modifie (Iglewicz-Hoaglin, base sur la MAD plutot que l'ecart-
+    type) : insensible aux valeurs aberrantes, contrairement a un z-score
+    classique. None si l'echantillon est trop petit ou si la MAD est nulle
+    (tous les prix identiques - un z-score n'aurait alors aucun sens)."""
+    if len(echantillon_cents) < n_min:
+        return None
+    med = statistics.median(echantillon_cents)
+    mad = statistics.median(abs(p - med) for p in echantillon_cents)
+    if mad == 0:
+        return None
+    return 0.6745 * (prix_cents - med) / mad
+
+
+def classifier(
+    prix_cents: int,
+    echantillon_cents: Sequence[int],
+    *,
+    n_min: int = 8,
+    seuil_erreur_z: float = -3.5,
+    seuil_affaire_z: float = -2.0,
+) -> Classification:
+    """Classifie prix_cents par rapport a l'echantillon comparable via son
+    z-score modifie. Seuils par defaut : AUDIT.md 2.3b."""
+    z = z_score_modifie(prix_cents, echantillon_cents, n_min=n_min)
+    if z is None:
+        return "donnees_insuffisantes"
+    if z <= seuil_erreur_z:
+        return "candidat_erreur_prix"
+    if z <= seuil_affaire_z:
+        return "bonne_affaire"
+    return "normal"
