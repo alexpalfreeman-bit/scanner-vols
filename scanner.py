@@ -220,6 +220,7 @@ def main() -> int:
             )
             resultats.append((nom_route, f"ok : {vol['prix']} {vol['devise']}"))
 
+    fournisseur.resume()
     ecrire_resume_github(resultats)
     total = len(resultats)
     echecs = sum(1 for _, r in resultats if r.startswith("ERREUR"))

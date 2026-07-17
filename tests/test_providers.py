@@ -1,4 +1,5 @@
 import json
+import logging
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock
@@ -380,3 +381,83 @@ def test_verifier_canari_partage_le_compteur_dechecs_avec_les_routes(monkeypatch
             fournisseur.meilleure_offre(_route())
 
     assert fournisseur._suspendu is True
+
+
+# ---------------------------------------------------------------- resume (2.4)
+
+
+def test_resume_compte_correctement_y_compris_echecs_total_apres_reset(monkeypatch) -> None:
+    fixture = json.loads((FIXTURES / "duffel_offer_request.json").read_text(encoding="utf-8"))
+    post_resilient_mock = Mock(
+        side_effect=[
+            RuntimeError("boom"),
+            RuntimeError("boom"),
+            RuntimeError("boom"),
+            _reponse_mock(fixture),  # succes -> reset le compteur consecutif
+            RuntimeError("boom"),
+        ]
+    )
+    monkeypatch.setattr(duffel, "post_resilient", post_resilient_mock)
+    fournisseur = _fournisseur(Mock())
+
+    for _ in range(3):
+        with pytest.raises(ErreurFournisseur):
+            fournisseur.meilleure_offre(_route())
+    fournisseur.meilleure_offre(_route())
+    with pytest.raises(ErreurFournisseur):
+        fournisseur.meilleure_offre(_route())
+
+    resume = fournisseur.resume()
+
+    assert resume.echecs_total == 4  # 3 + 1, malgre le reset du compteur consecutif au succes
+    assert resume.appels_reussis == 1
+    assert resume.appels_zero_offres == 0
+    assert resume.suspendu is False
+    assert resume.nom == "duffel"
+
+
+def test_resume_avertit_si_taux_zero_offres_anormal(caplog) -> None:
+    session = Mock()
+    session.post.return_value = _reponse_mock({"data": {"offers": []}})
+    fournisseur = _fournisseur(session)
+
+    for _ in range(6):
+        fournisseur.meilleure_offre(_route())
+
+    with caplog.at_level(logging.WARNING, logger="providers.duffel"):
+        resume = fournisseur.resume()
+
+    assert resume.appels_zero_offres == 6
+    assert "anormalement eleve" in caplog.text
+
+
+def test_resume_pas_davertissement_sous_le_seuil(caplog) -> None:
+    fixture = json.loads((FIXTURES / "duffel_offer_request.json").read_text(encoding="utf-8"))
+    session = Mock()
+    session.post.side_effect = [_reponse_mock({"data": {"offers": []}})] * 2 + [
+        _reponse_mock(fixture)
+    ] * 8
+    fournisseur = _fournisseur(session)
+
+    for _ in range(10):
+        fournisseur.meilleure_offre(_route())
+
+    with caplog.at_level(logging.WARNING, logger="providers.duffel"):
+        fournisseur.resume()
+
+    assert "anormalement eleve" not in caplog.text
+
+
+def test_resume_pas_davertissement_si_trop_peu_dappels(caplog) -> None:
+    session = Mock()
+    session.post.return_value = _reponse_mock({"data": {"offers": []}})
+    fournisseur = _fournisseur(session)
+
+    for _ in range(4):  # sous APPELS_REUSSIS_MIN_POUR_AVERTISSEMENT
+        fournisseur.meilleure_offre(_route())
+
+    with caplog.at_level(logging.WARNING, logger="providers.duffel"):
+        resume = fournisseur.resume()
+
+    assert resume.appels_zero_offres == 4
+    assert "anormalement eleve" not in caplog.text

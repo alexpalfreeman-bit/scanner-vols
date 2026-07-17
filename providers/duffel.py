@@ -26,6 +26,7 @@ from providers.base import (
     ErreurFournisseurSuspendu,
     ErreurValidationReponse,
     Offre,
+    ResumeFournisseur,
     Route,
 )
 
@@ -36,6 +37,15 @@ DUFFEL_VERSION = "v2"
 
 RETRIABLES = {429, 500, 502, 503, 504}
 ECHECS_CONSECUTIFS_MAX = 5
+
+# Seuil d'avertissement sur le taux de reponses "0 offre" (AUDIT.md 2.4).
+# Non specifie par AUDIT.md : point de depart conservateur assume (peu de
+# faux positifs pour un tout nouveau mecanisme), comme seuil_chute_pct en
+# Phase 2.3 - resume() logge le taux reel en INFO a chaque run, pas
+# seulement au franchissement du seuil, pour accumuler l'historique
+# empirique qui permettrait de le recalibrer plus tard.
+SEUIL_TAUX_ZERO_OFFRES = 0.5
+APPELS_REUSSIS_MIN_POUR_AVERTISSEMENT = 5
 
 # Route canari (AUDIT.md 2.4) : sonde la sante du fournisseur independamment
 # des destinations de config.yaml. JFK est un hub majeur avec des offres en
@@ -171,6 +181,8 @@ class FournisseurDuffel:
         self._echecs_consecutifs = 0  # remis a 0 a chaque succes -> pilote le circuit breaker
         self._echecs_cumules = 0  # jamais remis a 0 -> pilote resume().echecs_total
         self._suspendu = False
+        self._appels_reussis = 0
+        self._appels_zero_offres = 0
 
     def meilleure_offre(self, route: Route) -> Offre | None:
         """Circuit breaker (AUDIT.md 2.4) : suspend le fournisseur pour le
@@ -194,7 +206,40 @@ class FournisseurDuffel:
                 )
             raise
         self._echecs_consecutifs = 0
+        self._appels_reussis += 1
+        if offre is None:
+            self._appels_zero_offres += 1
         return offre
+
+    def resume(self) -> ResumeFournisseur:
+        """Snapshot de fin de run (AUDIT.md 2.4), a appeler une fois apres la
+        boucle de destinations - logge le taux de reponses "0 offre" en INFO
+        systematiquement, et en plus en WARNING s'il depasse
+        SEUIL_TAUX_ZERO_OFFRES (avec un minimum d'appels reussis pour eviter
+        le bruit sur un petit run)."""
+        if self._appels_reussis >= APPELS_REUSSIS_MIN_POUR_AVERTISSEMENT:
+            taux = self._appels_zero_offres / self._appels_reussis
+            logger.info(
+                "%s : taux de reponses 0-offre %.0f%% (%d/%d)",
+                self.nom,
+                taux * 100,
+                self._appels_zero_offres,
+                self._appels_reussis,
+            )
+            if taux > SEUIL_TAUX_ZERO_OFFRES:
+                logger.warning(
+                    "%s : taux de reponses 0-offre anormalement eleve (%.0f%%, seuil %.0f%%)",
+                    self.nom,
+                    taux * 100,
+                    SEUIL_TAUX_ZERO_OFFRES * 100,
+                )
+        return ResumeFournisseur(
+            nom=self.nom,
+            appels_reussis=self._appels_reussis,
+            appels_zero_offres=self._appels_zero_offres,
+            echecs_total=self._echecs_cumules,
+            suspendu=self._suspendu,
+        )
 
     def verifier_canari(self) -> bool:
         """Sonde la route canari (AUDIT.md 2.4) : passe par meilleure_offre,

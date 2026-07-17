@@ -144,7 +144,7 @@ def test_main_echoue_si_toutes_les_routes_echouent(
 @patch("scanner.FournisseurDuffel")
 @patch("scanner.charger_config")
 @patch("scanner.charger_env")
-def test_main_appelle_verifier_canari_une_fois(
+def test_main_appelle_verifier_canari_et_resume_une_fois(
     charger_env_mock,
     charger_config_mock,
     fournisseur_classe_mock,
@@ -166,6 +166,7 @@ def test_main_appelle_verifier_canari_une_fois(
     scanner.main()
 
     fournisseur_classe_mock.return_value.verifier_canari.assert_called_once()
+    fournisseur_classe_mock.return_value.resume.assert_called_once()
 
 
 # ---------------------------------------------------------------- logging (1.7)
