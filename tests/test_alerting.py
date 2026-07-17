@@ -9,7 +9,19 @@ def test_import_alerting() -> None:
     import alerting  # noqa: F401
 
 
-# ---------------------------------------------------------------- formater_alerte (1.5)
+# ---------------------------------------------------------------- formater_alerte (1.5 / 2.5)
+
+
+def _route(**overrides: object) -> dict:
+    base: dict = {"origine": "YUL", "destination": "CDG", "date_depart": "2026-01-01"}
+    base.update(overrides)
+    return base
+
+
+def _vol(**overrides: object) -> dict:
+    base: dict = {"prix": 500.0, "devise": "USD", "compagnie": "Air Test", "escales": 0}
+    base.update(overrides)
+    return base
 
 
 def test_formater_alerte_echappe_html_compagnie() -> None:
@@ -20,6 +32,80 @@ def test_formater_alerte_echappe_html_compagnie() -> None:
 
     assert "A&amp;B &lt;Air&gt;" in message
     assert "A&B <Air>" not in message
+
+
+def test_formater_alerte_echappe_html_devise() -> None:
+    """Regression : vol['devise'] n'etait pas echappe avant Phase 2.5."""
+    message = alerting.formater_alerte(_route(), _vol(devise="C&D"), ["bonne affaire"], None)
+
+    assert "C&amp;D" in message
+    assert "C&D" not in message
+
+
+def test_formater_alerte_echappe_html_date_retour() -> None:
+    route = _route(date_retour="2026-01-15 <script>")
+
+    message = alerting.formater_alerte(route, _vol(), ["bonne affaire"], None)
+
+    assert "2026-01-15 &lt;script&gt;" in message
+    assert "<script>" not in message
+
+
+def test_formater_alerte_vol_direct() -> None:
+    message = alerting.formater_alerte(_route(), _vol(escales=0), ["bonne affaire"], None)
+    assert "direct" in message
+
+
+def test_formater_alerte_avec_escales() -> None:
+    message = alerting.formater_alerte(_route(), _vol(escales=2), ["bonne affaire"], None)
+    assert "2 escale(s)" in message
+
+
+def test_formater_alerte_aller_simple() -> None:
+    message = alerting.formater_alerte(_route(), _vol(), ["bonne affaire"], None)
+    assert "(aller simple)" in message
+
+
+def test_formater_alerte_aller_retour() -> None:
+    route = _route(date_retour="2026-01-15")
+    message = alerting.formater_alerte(route, _vol(), ["bonne affaire"], None)
+    assert "→ retour 2026-01-15" in message
+    assert "(aller simple)" not in message
+
+
+def test_formater_alerte_stats_absent() -> None:
+    message = alerting.formater_alerte(_route(), _vol(), ["bonne affaire"], None)
+    assert "Première observation pour cette destination" in message
+
+
+def test_formater_alerte_stats_sans_tendance() -> None:
+    stats = {"n": 2, "min": 400.0, "mediane": 450.0, "tendance": None, "variation_pct": None}
+    message = alerting.formater_alerte(_route(), _vol(), ["bonne affaire"], stats)
+    assert "2 observation(s) — pas encore assez pour une tendance" in message
+
+
+def test_formater_alerte_tendance_hausse() -> None:
+    stats = {"n": 10, "min": 400.0, "mediane": 450.0, "tendance": "hausse", "variation_pct": 0.08}
+    message = alerting.formater_alerte(_route(), _vol(), ["bonne affaire"], stats)
+    assert "📈 Tendance hausse (+8%)" in message
+
+
+def test_formater_alerte_tendance_baisse() -> None:
+    stats = {
+        "n": 10,
+        "min": 400.0,
+        "mediane": 450.0,
+        "tendance": "baisse",
+        "variation_pct": -0.12,
+    }
+    message = alerting.formater_alerte(_route(), _vol(), ["bonne affaire"], stats)
+    assert "📉 Tendance baisse (-12%)" in message
+
+
+def test_formater_alerte_tendance_stable() -> None:
+    stats = {"n": 10, "min": 400.0, "mediane": 450.0, "tendance": "stable", "variation_pct": 0.01}
+    message = alerting.formater_alerte(_route(), _vol(), ["bonne affaire"], stats)
+    assert "➡️ Tendance stable (+1%)" in message
 
 
 # ---------------------------------------------------------------- envoyer_telegram
