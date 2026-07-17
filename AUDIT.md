@@ -119,7 +119,7 @@ de `config.yaml` (codes IATA à 3 lettres, seuils dans ]0,1[, etc.).
 Message d'erreur clair listant ce qui manque.
 **Test** : env incomplet → erreur explicite nommant la variable manquante.
 
-### 1.9 Offre la moins chère côté serveur
+### 1.9 Offre la moins chère côté serveur ✅
 Vérifier dans la doc Duffel v2 si la liste d'offres embarquée dans la réponse
 `offer_requests` peut être tronquée. Si oui, utiliser
 `GET /air/offers?offer_request_id=…&sort=total_amount&limit=1`.

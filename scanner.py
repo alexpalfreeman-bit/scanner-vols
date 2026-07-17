@@ -176,7 +176,18 @@ def extraire_message_erreur(r: requests.Response) -> str:
 
 
 def chercher_meilleur_vol(session: requests.Session, route: dict, config: dict) -> dict | None:
-    """Retourne l'offre la moins chere pour la route, ou None si rien trouve."""
+    """Retourne l'offre la moins chere pour la route, ou None si rien trouve.
+
+    Note (audit 1.9) : la doc Duffel v2 confirme que `return_offers=true`
+    embarque "all the offers returned by the airlines" dans la reponse de
+    creation - pas de troncature documentee. Duffel recommande plutot
+    `return_offers=false` + `GET /air/offers?...&sort=total_amount&limit=1`
+    pour profiter de la pagination/tri/filtre cote serveur sur les routes a
+    fort volume d'offres, pas pour corriger un probleme de fiabilite. Vu le
+    volume actuel (une poignee d'offres par route), le tri cote client via
+    min() reste correct et evite de doubler le nombre d'appels API par
+    route. A revisiter si la taille des reponses devient un probleme reel
+    (Phase 2, providers/duffel.py)."""
     # Une "slice" = un trajet (aller). Un aller-retour = deux slices.
     slices = [
         {
