@@ -3,9 +3,25 @@ Detection statistique (bonnes affaires, nouveaux minimums, seuils fixes).
 ----------------------------------------------------------------------------
 Fonctions pures uniquement : aucun reseau, aucun I/O, aucune lecture
 d'horloge. Tout est parametre, donc 100% testable (voir CLAUDE.md).
+
+Deux moteurs coexistent temporairement (voir AUDIT.md Phase 2.3) :
+- Phase 1 (ci-dessous) : encore cable dans scanner.py, prix en dollars
+  flottants.
+- Phase 2.3 (plus bas) : nouveau moteur (echantillon comparable avec repli
+  hierarchique, z-score MAD, corroboration, cooldown), pas encore cable.
+  Son contrat de donnees (dict miroir des lignes SQL des tables
+  observations/alertes, prix_cents entiers) est deliberement decouple de
+  la forme actuelle de storage.lire_historique() (dollars flottants) : le
+  cablage (adapter storage.py, scanner.py, config.py) est un travail futur
+  hors scope de cette phase.
 """
 
+import calendar
 import statistics
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Literal
 
 
 def statistiques_destination(
@@ -82,3 +98,98 @@ def raison_prix_max(
     if prix <= prix_max:
         return f"sous ton seuil fixe de {prix_max} {devise}"
     return None
+
+
+# ============================================================================
+# Phase 2.3 : nouveau moteur de detection (echantillon comparable, z-score
+# MAD, corroboration, cooldown). Voir le docstring du module.
+# ============================================================================
+
+NiveauEchantillon = Literal["route_mois_horizon", "route_mois", "route"]
+Classification = Literal["candidat_erreur_prix", "bonne_affaire", "normal", "donnees_insuffisantes"]
+VerdictCorroboration = Literal["erreur_prix", "bonne_affaire"]
+TypeAlerte = Literal["aubaine", "erreur_prix", "minimum"]
+
+
+# ---------------------------------------------------------------- echantillon_comparable (2.3.a)
+
+
+def _decaler_mois(reference: datetime, mois: int) -> datetime:
+    """reference moins `mois` mois calendaires (arithmetique exacte, pas une
+    approximation en jours - pas de dependance dateutil dans le projet).
+    Clampe le jour si le mois cible est plus court (ex. 31 aout - 6 mois ->
+    28 ou 29 fevrier)."""
+    total = reference.month - 1 - mois
+    annee = reference.year + total // 12
+    mois_cible = total % 12 + 1
+    dernier_jour = calendar.monthrange(annee, mois_cible)[1]
+    return reference.replace(year=annee, month=mois_cible, day=min(reference.day, dernier_jour))
+
+
+@dataclass(frozen=True)
+class EchantillonComparable:
+    """Resultat du repli hierarchique : `niveau` trace jusqu'ou il a fallu
+    elargir pour reunir des observations comparables."""
+
+    niveau: NiveauEchantillon
+    prix_cents: tuple[int, ...]
+
+    @property
+    def n(self) -> int:
+        return len(self.prix_cents)
+
+
+def echantillon_comparable(
+    observations: Sequence[dict],
+    *,
+    route_id: int,
+    devise: str,
+    date_depart_candidat: str,
+    horizon_jours_candidat: int,
+    maintenant: datetime,
+    fenetre_horizon_jours: int = 21,
+    fenetre_historique_mois: int = 18,
+    n_min: int = 8,
+) -> EchantillonComparable:
+    """Echantillon de prix comparables au candidat (meme route, meme devise,
+    observes dans les `fenetre_historique_mois` derniers mois), avec repli
+    hierarchique route+mois+horizon -> route+mois -> route : s'arrete au
+    premier niveau avec n >= n_min, ou retombe sur "route" avec son n reel
+    si aucun niveau ne l'atteint (jamais None - c'est z_score_modifie qui
+    decide de l'insuffisance, cf. section suivante).
+
+    `observations` : dicts au format des lignes de la table `observations`
+    (cles route_id, devise, observe_le, date_depart, horizon_jours,
+    prix_cents - voir storage.py). `maintenant` doit etre timezone-aware
+    (UTC, comme tous les timestamps du projet, voir CLAUDE.md)."""
+    if maintenant.tzinfo is None:
+        raise ValueError("maintenant doit etre timezone-aware (UTC)")
+
+    seuil_recence = _decaler_mois(maintenant, fenetre_historique_mois)
+    mois_candidat = date.fromisoformat(date_depart_candidat).month
+
+    base = [
+        o
+        for o in observations
+        if o["route_id"] == route_id
+        and o["devise"] == devise
+        and datetime.fromisoformat(o["observe_le"]) >= seuil_recence
+    ]
+    memes_mois = [o for o in base if date.fromisoformat(o["date_depart"]).month == mois_candidat]
+    memes_mois_horizon = [
+        o
+        for o in memes_mois
+        if horizon_jours_candidat - fenetre_horizon_jours
+        <= o["horizon_jours"]
+        <= horizon_jours_candidat + fenetre_horizon_jours
+    ]
+
+    niveaux: list[tuple[NiveauEchantillon, list[dict]]] = [
+        ("route_mois_horizon", memes_mois_horizon),
+        ("route_mois", memes_mois),
+        ("route", base),
+    ]
+    for niveau, lignes in niveaux:
+        if len(lignes) >= n_min:
+            return EchantillonComparable(niveau, tuple(o["prix_cents"] for o in lignes))
+    return EchantillonComparable("route", tuple(o["prix_cents"] for o in base))
