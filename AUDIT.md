@@ -271,7 +271,7 @@ nouveau prix est < 90 % du prix déjà alerté.
 **e) Conserver** les seuils fixes `prix_max` par destination (comportement actuel),
 comparés dans la bonne devise (cf. 1.1).
 
-- [ ] Tests exhaustifs de `detection.py` : n<8 → insuffisant ; MAD=0 → insuffisant ;
+- [x] Tests exhaustifs de `detection.py` : n<8 → insuffisant ; MAD=0 → insuffisant ;
       outlier net → candidat_erreur_prix ; -25 % → bonne_affaire ; repli
       hiérarchique ; cooldown ; corroboration (chaque combinaison de signaux).
 
@@ -491,3 +491,111 @@ retouche tous les points d'appel de `main()`).
   `data/history.csv` corrigées en `data/scanner.db` (3 endroits).
 - Vérifié : `ruff check`, `ruff format --check`, `mypy` et `pytest -q`
   tous verts ; poussé sur `refactor-audit`.
+
+### Phase 2.3 — moteur de détection (2026-07-17)
+
+Périmètre de cette session, donné explicitement par l'utilisateur : les
+fonctions pures de `detection.py` + `tests/test_detection.py` uniquement,
+« UNIQUEMENT » — pas `storage.py`, `scanner.py`, `config.py`/`config.yaml`,
+`providers/`. Plan présenté et validé avant implémentation (y compris un
+arbitrage explicite de l'utilisateur, voir plus bas). Conception
+pressure-testée via un agent Plan dédié avant validation.
+
+- **Nouveau moteur ajouté à côté de l'ancien**, pas en remplacement :
+  `statistiques_destination`, `est_nouveau_minimum`, `raison_prix_max`
+  (Phase 1) restent intouchées et continuent d'être ce que `scanner.py`
+  appelle réellement. Le nouveau moteur (`echantillon_comparable`,
+  `z_score_modifie`, `classifier`, `corroborer_erreur_prix`, `doit_alerter`,
+  helpers associés) n'est **pas câblé** — c'est un contrat testé
+  uniquement avec des fixtures synthétiques, comme convenu. Câblage
+  (adapter `storage.py` pour exposer `route_id`/`horizon_jours`/
+  `prix_cents` nativement, remplacer les appels dans `scanner.py`, mapper
+  le vocabulaire `classifier()` ↔ `alertes.type`, brancher un flag de
+  config pour la corroboration, peupler `stats_routes`/`alertes`) reste
+  entièrement à faire — prochaine session.
+- **Argent en centimes entiers** dans tout le nouveau moteur (règle
+  CLAUDE.md), ce qui referme la dérogation actée au Journal de la Phase 2.2
+  (dollars flottants « jusqu'à la réécriture du moteur de détection en
+  2.3 »). Contrat de données déconnecté de la forme actuelle de
+  `storage.lire_historique()` : les nouvelles fonctions attendent des
+  `dict` miroir des lignes SQL (`route_id`, `horizon_jours`, `prix_cents`,
+  `devise`, `observe_le`, `date_depart`), pas les dicts dollars-flottants
+  d'aujourd'hui. Décision assumée : plutôt que de faire coller le nouveau
+  moteur à une forme de stockage qui doit de toute façon changer au
+  câblage, il définit son propre contrat correct dès maintenant.
+- **Repli hiérarchique** (`echantillon_comparable`) : route+mois+horizon →
+  route+mois → route, arrêt au premier niveau avec n ≥ 8, sinon retombe sur
+  `route` avec son n réel (jamais `None`). Fenêtre de 18 mois calculée par
+  arithmétique calendaire exacte (`calendar.monthrange`, stdlib) plutôt
+  qu'une approximation en jours — pas de dépendance ajoutée
+  (`python-dateutil` n'est pas dans le projet).
+- **Score robuste** (`z_score_modifie`/`classifier`) : portage direct de la
+  référence AUDIT (Iglewicz-Hoaglin, seuils -3.5/-2.0) en centimes entiers,
+  seuils/`n_min` paramétrables.
+- **Corroboration** (`corroborer_erreur_prix`) : signal 1 (re-requête)
+  obligatoire, verdict `erreur_prix` seulement s'il est confirmé **et**
+  qu'au moins un des signaux 2/3/4 corrobore. Retourne un
+  `ResultatCorroboration` (verdict + chaque signal individuel) plutôt
+  qu'une simple string, pour la traçabilité future (logs/message d'alerte).
+  **Arbitrage utilisateur explicite** sur le signal 2 (dates voisines ±3
+  jours) : l'énoncé d'AUDIT.md (« l'anomalie est-elle localisée ? ») était
+  ambigu entre deux lectures opposées ; l'utilisateur a tranché pour
+  « voisines aussi anormalement basses = signal confirmant » (une vraie
+  erreur tarifaire touche typiquement une plage de dates, pas un jour
+  isolé) plutôt que la lecture littérale inverse (voisines à prix normal
+  = anomalie confirmée isolée à cette date).
+- **Déduplication/cooldown** (`doit_alerter`) : `alerte_precedente` est
+  singulière (`dict | None`), pas une liste — l'index `UNIQUE
+  idx_dedup (route_id, date_depart, type)` de la table `alertes` garantit
+  qu'il ne peut jamais en exister plus d'une pour une clé donnée. Pas de
+  garde de cohérence entre `alerte_precedente` et la clé demandée
+  (route_id/date_depart/type_alerte) : ce sont des paramètres
+  documentaires (la signature décrit la clé) mais l'appelant est réputé
+  avoir déjà filtré correctement (ex. clause SQL `WHERE`), cohérent avec
+  la consigne CLAUDE.md de ne pas valider l'invalidable.
+- **Un seul garde-fou ajouté** : `maintenant` doit être timezone-aware
+  (`ValueError` explicite sinon) dans `echantillon_comparable` et
+  `doit_alerter` — frontière pur/impur (résultat d'une lecture d'horloge
+  faite par l'appelant), pas un « ça ne peut pas arriver » interne.
+- **Types `Literal`** aux frontières de vocabulaire (`Classification`,
+  `VerdictCorroboration`, `TypeAlerte`) plutôt que `str` générique.
+  `TypeAlerte = Literal["aubaine", "erreur_prix", "minimum"]` rend visible
+  statiquement que le vocabulaire de `classifier()`
+  (`candidat_erreur_prix`/`bonne_affaire`/`normal`/`donnees_insuffisantes`)
+  et celui de la colonne `alertes.type` sont deux choses différentes — le
+  mapping entre les deux se fera au câblage, pas dans `detection.py`.
+- **Écarts connus, documentés mais non corrigés cette session** (aucun
+  n'est une régression — tous préexistants ou explicitement hors périmètre) :
+  la table `alertes` n'a pas de colonne `devise` (le cooldown suppose donc
+  la même devise entre deux alertes successives — vrai en pratique
+  aujourd'hui, un seul compte Duffel) ; le bucketing `tranche_horizon` (4
+  tranches fixes) de `stats_routes` ne correspond pas à la fenêtre glissante
+  ±21 jours utilisée ici (peuplement de `stats_routes` reste un
+  non-objectif, la case correspondante de la Phase 2.2 reste décochée) ;
+  `cabine`/`escales`/`fournisseur` non filtrés dans l'échantillon comparable
+  (sans risque tant que `config.yaml` n'a qu'une seule classe/un seul
+  fournisseur) ; `n_min` (8) existe indépendamment dans
+  `echantillon_comparable` et `z_score_modifie`/`classifier` — couplés par
+  convention documentée, pas par le code, un test fige le comportement
+  dégradé (pas cassé) si jamais désaccordés ; `seuil_chute_pct` (0.40, signal
+  4 de corroboration) n'a pas de valeur donnée par AUDIT.md contrairement
+  aux seuils -3.5/-2.0 — défaut assumé, repris de l'ancien
+  `seuil_erreur_prix_pct`.
+- Tests : 76 tests neufs dans `tests/test_detection.py` (85 au total dans ce
+  fichier avec les 9 déjà là, 121 pour la suite complète), toutes fixtures
+  synthétiques à échantillons contrôlés — aucun accès à la vraie base,
+  conformément à la consigne. Une seule utilisation de
+  `pytest.mark.parametrize` dans tout le projet (matrice des 2³
+  combinaisons de signaux de corroboration), volontairement ciblée plutôt
+  que généralisée au reste du fichier de tests. Couverture vérifiée avec
+  `coverage` installé de façon éphémère dans le venv (jamais ajouté à
+  `pyproject.toml`) : 100 % lignes/branches sur tout le nouveau moteur
+  (aucune ligne/branche manquante à partir de la section Phase 2.3 du
+  fichier) ; les seules lignes non couvertes du fichier appartiennent au
+  code Phase 1 préexistant et non touché (`statistiques_destination`/
+  `raison_prix_max`), déjà le cas avant cette session — pas une régression,
+  hors périmètre.
+- Vérifié : `ruff check`, `ruff format --check`, `mypy` et `pytest -q`
+  tous verts (121 tests) ; poussé sur `refactor-audit`. Comportement
+  nominal du scanner inchangé (aucune fonction Phase 1 modifiée, rien de
+  câblé côté `scanner.py`).
