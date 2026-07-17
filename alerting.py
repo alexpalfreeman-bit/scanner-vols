@@ -8,12 +8,14 @@ import html
 import logging
 import random
 import time
+from collections.abc import Sequence
 from datetime import datetime
 
 import requests
 
 from config import Env
 from detection import TypeAlerte, doit_alerter
+from providers.base import ResumeFournisseur
 
 logger = logging.getLogger(__name__)
 
@@ -173,4 +175,121 @@ def envoyer_alerte(
         )
         return False
     envoyer_telegram(formater_alerte(route, vol, raisons, stats), env)
+    return True
+
+
+# ---------------------------------------------------------------- digest technique (2.5)
+
+# Mirroir volontairement decouple de providers/duffel.py::SEUIL_TAUX_ZERO_OFFRES /
+# APPELS_REUSSIS_MIN_POUR_AVERTISSEMENT : providers/base.py documente que
+# ResumeFournisseur doit rester le contrat generique consomme par ce digest (un
+# futur 2e fournisseur, ex. Amadeus, doit fonctionner sans changement ici) -
+# meme raisonnement que RETRIABLES plus haut dans ce fichier.
+SEUIL_TAUX_ZERO_OFFRES = 0.5
+APPELS_REUSSIS_MIN_POUR_AVERTISSEMENT = 5
+
+# Limite Telegram : 4096 caracteres/message. Les deux plafonds suivants bornent
+# le pire cas (toutes les routes en erreur, details longs) tres en-dessous :
+# MAX_ROUTES_ERREUR_AFFICHEES lignes x (~27 car. d'entete + MAX_LONGUEUR_DETAIL_ERREUR
+# de detail) ~= 2540 caracteres, marge confortable pour l'en-tete et les
+# fournisseurs (verifie par test, cf. tests/test_alerting.py).
+MAX_ROUTES_ERREUR_AFFICHEES = 20
+MAX_LONGUEUR_DETAIL_ERREUR = 100
+
+
+def _est_echec(resultat: str) -> bool:
+    """Meme convention que scanner.py/ecrire_resume_github : un resultat qui
+    commence par "ERREUR" compte comme echec pour la politique de sortie du
+    scan. Dependance a cette convention documentee ici, pas redecidee a
+    chaque appelant."""
+    return resultat.startswith("ERREUR")
+
+
+def digest_necessaire(
+    resultats: Sequence[tuple[str, str]], resumes: Sequence[ResumeFournisseur]
+) -> bool:
+    """True si au moins une route a echoue (_est_echec), OU au moins un
+    fournisseur est suspendu, OU le taux de reponses 0-offre d'un
+    fournisseur est anormal. Ce dernier cas n'est pas une extrapolation :
+    AUDIT.md 2.4 dit explicitement qu'un taux anormal doit produire "un
+    avertissement dans le digest technique", et le Journal Phase 2.4 decrit
+    le log GitHub Actions comme "seul filet de securite reel en l'absence du
+    digest" - ce digest doit devenir ce filet, pas seulement afficher le
+    taux quand il se declenche deja pour une autre raison."""
+    if any(_est_echec(resultat) for _, resultat in resultats):
+        return True
+    for resume in resumes:
+        if resume.suspendu:
+            return True
+        if (
+            resume.appels_reussis >= APPELS_REUSSIS_MIN_POUR_AVERTISSEMENT
+            and resume.appels_zero_offres / resume.appels_reussis > SEUIL_TAUX_ZERO_OFFRES
+        ):
+            return True
+    return False
+
+
+def _ligne_fournisseur(resume: ResumeFournisseur) -> str:
+    nom = _echapper(resume.nom)
+    if resume.appels_reussis == 0:
+        taux_texte = "aucun appel reussi"
+    else:
+        taux = resume.appels_zero_offres / resume.appels_reussis
+        anomalie = " ⚠️" if taux > SEUIL_TAUX_ZERO_OFFRES else ""
+        taux_texte = (
+            f"{resume.appels_reussis} appel(s) reussi(s), {taux:.0%} reponses 0-offre{anomalie}"
+        )
+    suspendu = " — SUSPENDU" if resume.suspendu else ""
+    return f"  • {nom} : {taux_texte}{suspendu}"
+
+
+def formater_digest(
+    resultats: Sequence[tuple[str, str]], resumes: Sequence[ResumeFournisseur]
+) -> str:
+    """Message technique HTML (parse_mode=HTML) : compte de routes OK/en
+    erreur, liste des routes en erreur (plafonnee a MAX_ROUTES_ERREUR_AFFICHEES,
+    chaque detail echappe PUIS tronque a MAX_LONGUEUR_DETAIL_ERREUR - dans cet
+    ordre, pour que la longueur affichee reste bornee meme si l'echappement
+    allonge le texte, ex. "<" -> "&lt;" ; un detail peut contenir du HTML brut
+    venant de extraire_message_erreur sur un 502, ex. r.text[:200]), puis une
+    ligne par fournisseur. Fonction pure : aucune lecture d'horloge, pas de
+    timestamp absolu dans le message (Telegram horodate deja les messages
+    recus)."""
+    erreurs = [(nom, detail) for nom, detail in resultats if _est_echec(detail)]
+    total = len(resultats)
+    n_erreurs = len(erreurs)
+
+    lignes = [
+        "🛠️ <b>Digest technique du scan</b>",
+        f"📊 {total - n_erreurs}/{total} routes OK, {n_erreurs} en erreur",
+    ]
+
+    if erreurs:
+        lignes.append("")
+        lignes.append("🔴 Routes en erreur :")
+        for nom, detail in erreurs[:MAX_ROUTES_ERREUR_AFFICHEES]:
+            detail_affiche = _echapper(detail)[:MAX_LONGUEUR_DETAIL_ERREUR]
+            lignes.append(f"  • {_echapper(nom)} — {detail_affiche}")
+        reste = n_erreurs - MAX_ROUTES_ERREUR_AFFICHEES
+        if reste > 0:
+            lignes.append(f"  ... et {reste} autre(s)")
+
+    if resumes:
+        lignes.append("")
+        lignes.append("🔌 Fournisseurs :")
+        lignes.extend(_ligne_fournisseur(resume) for resume in resumes)
+
+    return "\n".join(lignes)
+
+
+def envoyer_digest(
+    resultats: Sequence[tuple[str, str]], resumes: Sequence[ResumeFournisseur], env: Env
+) -> bool:
+    """Envoie le digest technique seulement si digest_necessaire (AUDIT.md
+    2.5) : cf. son docstring pour les 3 conditions de declenchement. Retourne
+    True si un message a ete envoye. Pas encore appelee par scanner.py
+    (cablage : session suivante)."""
+    if not digest_necessaire(resultats, resumes):
+        return False
+    envoyer_telegram(formater_digest(resultats, resumes), env)
     return True

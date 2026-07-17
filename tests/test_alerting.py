@@ -7,6 +7,7 @@ import requests
 
 import alerting
 from config import Env
+from providers.base import ResumeFournisseur
 
 
 def _env() -> Env:
@@ -293,3 +294,184 @@ def test_envoyer_alerte_log_info_quand_supprimee(telegram_mock, caplog) -> None:
         )
 
     assert "alerte supprimee" in caplog.text
+
+
+# ---------------------------------------------------------------- digest technique (2.5)
+
+
+def _resume(**overrides: object) -> ResumeFournisseur:
+    base: dict = {
+        "nom": "duffel",
+        "appels_reussis": 10,
+        "appels_zero_offres": 2,
+        "echecs_total": 0,
+        "suspendu": False,
+    }
+    base.update(overrides)
+    return ResumeFournisseur(**base)
+
+
+# --- digest_necessaire
+
+
+def test_digest_necessaire_run_sain_pas_de_digest() -> None:
+    resultats = [("YUL→CDG (2026-09-01)", "ok : 500 USD")]
+    resumes = [_resume(appels_reussis=10, appels_zero_offres=2)]  # 20%, sous le seuil
+
+    assert alerting.digest_necessaire(resultats, resumes) is False
+
+
+def test_digest_necessaire_route_en_erreur() -> None:
+    resultats = [("YUL→CUN (2026-08-01)", "ERREUR API : HTTP 502")]
+
+    assert alerting.digest_necessaire(resultats, []) is True
+
+
+def test_digest_necessaire_fournisseur_suspendu() -> None:
+    resumes = [_resume(suspendu=True)]
+
+    assert alerting.digest_necessaire([], resumes) is True
+
+
+def test_digest_necessaire_taux_zero_offre_anormal() -> None:
+    resumes = [_resume(appels_reussis=10, appels_zero_offres=6)]  # 60%
+
+    assert alerting.digest_necessaire([], resumes) is True
+
+
+def test_digest_necessaire_taux_zero_offre_sous_le_seuil() -> None:
+    resumes = [_resume(appels_reussis=10, appels_zero_offres=4)]  # 40%
+
+    assert alerting.digest_necessaire([], resumes) is False
+
+
+def test_digest_necessaire_frontiere_exacte_seuil() -> None:
+    resumes = [_resume(appels_reussis=10, appels_zero_offres=5)]  # exactement 50%
+
+    assert alerting.digest_necessaire([], resumes) is False  # strictement superieur requis
+
+
+def test_digest_necessaire_taux_eleve_mais_trop_peu_dappels() -> None:
+    resumes = [_resume(appels_reussis=4, appels_zero_offres=4)]  # 100%, sous le minimum (5)
+
+    assert alerting.digest_necessaire([], resumes) is False
+
+
+def test_digest_necessaire_appels_reussis_zero_pas_de_crash() -> None:
+    resumes = [_resume(appels_reussis=0, appels_zero_offres=0)]
+
+    assert alerting.digest_necessaire([], resumes) is False
+
+
+def test_digest_necessaire_entrees_vides() -> None:
+    assert alerting.digest_necessaire([], []) is False
+
+
+# --- formater_digest
+
+
+def test_formater_digest_compte_ok_et_erreur() -> None:
+    resultats = [
+        ("YUL→CDG (2026-09-01)", "ok : 500 USD"),
+        ("YUL→CUN (2026-08-01)", "ERREUR API : HTTP 502"),
+        ("YUL→NRT (2026-10-01)", "alerte envoyée : 800 USD"),
+    ]
+
+    message = alerting.formater_digest(resultats, [])
+
+    assert "2/3 routes OK, 1 en erreur" in message
+
+
+def test_formater_digest_echappe_details_erreur_html_brut() -> None:
+    resultats = [("YUL→CUN (2026-08-01)", "ERREUR API : HTTP 502 : <html><body>oops</body></html>")]
+
+    message = alerting.formater_digest(resultats, [])
+
+    assert "<html>" not in message
+    assert "&lt;html&gt;" in message
+
+
+def test_formater_digest_echappe_nom_fournisseur() -> None:
+    resumes = [_resume(nom="duf&fel")]
+
+    message = alerting.formater_digest([], resumes)
+
+    assert "duf&amp;fel" in message
+    assert "duf&fel" not in message
+
+
+def test_formater_digest_mentionne_suspendu() -> None:
+    resumes = [_resume(nom="duffel", suspendu=True)]
+
+    message = alerting.formater_digest([], resumes)
+
+    assert "SUSPENDU" in message
+
+
+def test_formater_digest_plafonne_routes_affichees() -> None:
+    resultats = [(f"YUL→XX{i} (2026-09-01)", "ERREUR API : boom") for i in range(25)]
+
+    message = alerting.formater_digest(resultats, [])
+
+    assert message.count("ERREUR API") == alerting.MAX_ROUTES_ERREUR_AFFICHEES
+    assert "5 autre(s)" in message
+
+
+def test_formater_digest_tronque_detail_trop_long() -> None:
+    detail = "ERREUR" + "x" * 300
+    resultats = [("YUL→CUN (2026-08-01)", detail)]
+
+    message = alerting.formater_digest(resultats, [])
+
+    assert detail[: alerting.MAX_LONGUEUR_DETAIL_ERREUR] in message
+    assert detail[: alerting.MAX_LONGUEUR_DETAIL_ERREUR + 1] not in message
+
+
+def test_formater_digest_reste_sous_la_limite_telegram() -> None:
+    resultats = [(f"YUL→XX{i} (2026-09-01)", "ERREUR API : " + "x" * 300) for i in range(50)]
+    resumes = [_resume(nom="duffel", suspendu=True), _resume(nom="amadeus")]
+
+    message = alerting.formater_digest(resultats, resumes)
+
+    assert len(message) < 4096
+
+
+def test_formater_digest_ne_liste_pas_les_routes_ok() -> None:
+    resultats = [
+        ("YUL→CDG (2026-09-01)", "ok : 500 USD"),
+        ("YUL→CUN (2026-08-01)", "ERREUR API : boom"),
+    ]
+
+    message = alerting.formater_digest(resultats, [])
+
+    assert "YUL→CDG" not in message
+    assert "YUL→CUN" in message
+
+
+def test_formater_digest_entrees_vides_pas_de_crash() -> None:
+    message = alerting.formater_digest([], [])
+
+    assert "0/0 routes OK, 0 en erreur" in message
+
+
+# --- envoyer_digest
+
+
+@patch("alerting.envoyer_telegram")
+def test_envoyer_digest_necessaire_envoie_et_retourne_true(telegram_mock) -> None:
+    resultats = [("YUL→CUN (2026-08-01)", "ERREUR API : boom")]
+
+    resultat = alerting.envoyer_digest(resultats, [], _env())
+
+    assert resultat is True
+    telegram_mock.assert_called_once()
+
+
+@patch("alerting.envoyer_telegram")
+def test_envoyer_digest_non_necessaire_ne_envoie_pas_et_retourne_false(telegram_mock) -> None:
+    resultats = [("YUL→CDG (2026-09-01)", "ok : 500 USD")]
+
+    resultat = alerting.envoyer_digest(resultats, [], _env())
+
+    assert resultat is False
+    telegram_mock.assert_not_called()
