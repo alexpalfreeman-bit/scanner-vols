@@ -73,6 +73,7 @@ class Detection(BaseModel):
     echantillon_min: int = Field(gt=0, default=5)
     fenetre_tendance: int = Field(gt=0, default=5)
     variation_tendance_pct: float = Field(gt=0, lt=1, default=0.05)
+    marge_minimum_pct: float = Field(gt=0, lt=1, default=0.03)
 
 
 class ConfigApp(BaseModel):

@@ -51,7 +51,7 @@ Duffel renvoie la devise du compte (USD dans l'historique actuel). Conséquences
 **Test** : un historique mêlant USD et CAD → les stats n'utilisent que la devise
 demandée ; un `prix_max` n'est comparé qu'à un prix de même devise.
 
-### 1.2 Alerte « nouveau minimum » sans garde
+### 1.2 Alerte « nouveau minimum » sans garde ✅
 **Problème** : l'alerte se déclenche dès que `prix < min historique`, sans taille
 d'échantillon minimale ni marge → spam pendant les premières semaines (la rotation
 des dates rend les premiers runs pleins de « nouveaux minimums »).

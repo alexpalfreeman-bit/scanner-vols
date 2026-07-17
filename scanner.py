@@ -288,6 +288,18 @@ def statistiques_destination(
     }
 
 
+def est_nouveau_minimum(
+    prix: float, stats: dict | None, echantillon_min: int, marge_minimum_pct: float
+) -> bool:
+    """Un "nouveau minimum" n'est significatif qu'avec un minimum d'historique
+    (sinon la rotation des dates candidates fait qu'un simple changement de
+    date ressemble a un nouveau minimum) et une marge sous l'ancien minimum
+    (pour ignorer le bruit de quelques pourcents)."""
+    if stats is None or stats["n"] < echantillon_min:
+        return False
+    return prix < float(stats["min"]) * (1 - marge_minimum_pct)
+
+
 def ajouter_historique(ligne: dict) -> None:
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     nouveau_fichier = not HISTORY_FILE.exists()
@@ -426,7 +438,9 @@ def main() -> int:
         )
         if raison_seuil:
             raisons.append(raison_seuil)
-        if stats and vol["prix"] < stats["min"]:
+        echantillon_min = detection_cfg.get("echantillon_min", 5)
+        marge_minimum_pct = detection_cfg.get("marge_minimum_pct", 0.03)
+        if stats and est_nouveau_minimum(vol["prix"], stats, echantillon_min, marge_minimum_pct):
             raisons.append(f"nouveau minimum historique (précédent {stats['min']} {vol['devise']})")
         if stats and stats["n"] >= detection_cfg.get("echantillon_min", 5):
             seuil_bonne_affaire = detection_cfg.get("seuil_bonne_affaire_pct", 0.15)
