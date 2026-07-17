@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import scanner
 
@@ -64,6 +64,29 @@ def test_raison_prix_max_devise_differente_retourne_none() -> None:
 
 def test_raison_prix_max_aucun_seuil_configure_retourne_none() -> None:
     assert scanner.raison_prix_max(400, "CAD", None, "CAD") is None
+
+
+# ---------------------------------------------------------------- extraire_message_erreur (1.3)
+
+
+def test_extraire_message_erreur_json_valide() -> None:
+    r = Mock()
+    r.json.return_value = {
+        "errors": [{"type": "invalid_request_error", "title": "Bad", "message": "oops"}]
+    }
+
+    assert scanner.extraire_message_erreur(r) == "invalid_request_error: Bad: oops"
+
+
+def test_extraire_message_erreur_corps_html_502() -> None:
+    r = Mock()
+    r.json.side_effect = ValueError("pas du JSON")
+    r.status_code = 502
+    r.text = "<html><body>Bad Gateway</body></html>"
+
+    message = scanner.extraire_message_erreur(r)
+
+    assert "502" in message
 
 
 # ---------------------------------------------------------------- main() : politique de sortie

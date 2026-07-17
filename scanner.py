@@ -132,6 +132,18 @@ def generer_candidats(config: dict) -> list[dict]:
 # ---------------------------------------------------------------- recherche
 
 
+def extraire_message_erreur(r: requests.Response) -> str:
+    """Message d'erreur lisible a partir d'une reponse HTTP en echec. Si le
+    corps n'est pas du JSON exploitable (ex. page HTML d'un 502), on retombe
+    sur le code HTTP + le debut du corps plutot que de laisser JSONDecodeError
+    masquer l'erreur reelle."""
+    try:
+        erreur = (r.json().get("errors") or [{}])[0]
+        return f"{erreur.get('type')}: {erreur.get('title')}: {erreur.get('message')}"
+    except (ValueError, KeyError, AttributeError, IndexError, TypeError):
+        return f"HTTP {r.status_code} : {r.text[:200]}"
+
+
 def chercher_meilleur_vol(session: requests.Session, route: dict, config: dict) -> dict | None:
     """Retourne l'offre la moins chere pour la route, ou None si rien trouve."""
     # Une "slice" = un trajet (aller). Un aller-retour = deux slices.
@@ -168,8 +180,7 @@ def chercher_meilleur_vol(session: requests.Session, route: dict, config: dict) 
         timeout=30,
     )
     if not r.ok:
-        erreur = (r.json().get("errors") or [{}])[0]
-        raise RuntimeError(f"{erreur.get('type')}: {erreur.get('title')}: {erreur.get('message')}")
+        raise RuntimeError(extraire_message_erreur(r))
 
     offres = r.json()["data"].get("offers") or []
     if not offres:

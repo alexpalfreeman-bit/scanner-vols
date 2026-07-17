@@ -60,7 +60,7 @@ des dates rend les premiers runs pleins de « nouveaux minimums »).
 **Test** : n=3 → pas d'alerte même si prix plus bas ; n=6 et prix à 99 % du min
 → pas d'alerte ; n=6 et prix à 95 % du min → alerte.
 
-### 1.3 `r.json()` dans la branche d'erreur
+### 1.3 `r.json()` dans la branche d'erreur ✅
 **Problème** : si l'API renvoie une erreur non-JSON (page HTML d'un 502),
 `r.json()` lève `JSONDecodeError` et masque l'erreur HTTP réelle.
 **Correctif** : envelopper le parsing d'erreur ; en cas d'échec, remonter
