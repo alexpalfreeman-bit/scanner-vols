@@ -136,6 +136,38 @@ def test_main_echoue_si_toutes_les_routes_echouent(
     assert scanner.main() == 1
 
 
+@patch("scanner.ecrire_resume_github")
+@patch("scanner.ajouter_historique")
+@patch("scanner.statistiques_destination", return_value=None)
+@patch("scanner.generer_candidats")
+@patch("scanner.lire_historique", return_value=[])
+@patch("scanner.FournisseurDuffel")
+@patch("scanner.charger_config")
+@patch("scanner.charger_env")
+def test_main_appelle_verifier_canari_une_fois(
+    charger_env_mock,
+    charger_config_mock,
+    fournisseur_classe_mock,
+    lire_historique_mock,
+    generer_candidats_mock,
+    stats_mock,
+    ajouter_historique_mock,
+    resume_mock,
+) -> None:
+    charger_config_mock.return_value = _config_minimal(2)
+    generer_candidats_mock.return_value = [
+        {"origine": "YUL", "destination": f"D{i}", "date_depart": "2026-01-01"} for i in range(2)
+    ]
+    fournisseur_classe_mock.return_value.meilleure_offre.side_effect = [
+        _offre_sans_alerte(),
+        _offre_sans_alerte(),
+    ]
+
+    scanner.main()
+
+    fournisseur_classe_mock.return_value.verifier_canari.assert_called_once()
+
+
 # ---------------------------------------------------------------- logging (1.7)
 
 

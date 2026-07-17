@@ -136,6 +136,7 @@ def main() -> int:
         return 1
 
     fournisseur = FournisseurDuffel(env, config)
+    fournisseur.verifier_canari()
     historique = lire_historique()
     detection_cfg = config.get("detection", {})
 

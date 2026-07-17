@@ -323,3 +323,60 @@ def test_circuit_breaker_reset_apres_succes_intercale(monkeypatch) -> None:
             fournisseur.meilleure_offre(_route())
 
     assert fournisseur._suspendu is False
+
+
+# ---------------------------------------------------------------- verifier_canari (2.4)
+
+
+def _config_canari() -> dict:
+    return {"origine": "YUL", "adultes": 1, "classe": "economy"}
+
+
+def test_verifier_canari_succes_retourne_true() -> None:
+    fixture = json.loads((FIXTURES / "duffel_offer_request.json").read_text(encoding="utf-8"))
+    session = Mock()
+    session.post.return_value = _reponse_mock(fixture)
+    fournisseur = _fournisseur(session, _config_canari())
+
+    assert fournisseur.verifier_canari() is True
+
+
+def test_verifier_canari_exception_retourne_false_sans_propager(monkeypatch) -> None:
+    monkeypatch.setattr(duffel, "post_resilient", Mock(side_effect=RuntimeError("boom")))
+    fournisseur = _fournisseur(Mock(), _config_canari())
+
+    assert fournisseur.verifier_canari() is False
+
+
+def test_verifier_canari_zero_offre_retourne_false() -> None:
+    session = Mock()
+    session.post.return_value = _reponse_mock({"data": {"offers": []}})
+    fournisseur = _fournisseur(session, _config_canari())
+
+    assert fournisseur.verifier_canari() is False
+
+
+def test_verifier_canari_construit_une_route_aller_simple_vers_jfk() -> None:
+    session = Mock()
+    session.post.return_value = _reponse_mock({"data": {"offers": []}})
+    fournisseur = _fournisseur(session, _config_canari())
+
+    fournisseur.verifier_canari()
+
+    corps = session.post.call_args.kwargs["json"]
+    slices = corps["data"]["slices"]
+    assert len(slices) == 1
+    assert slices[0]["origin"] == "YUL"
+    assert slices[0]["destination"] == "JFK"
+
+
+def test_verifier_canari_partage_le_compteur_dechecs_avec_les_routes(monkeypatch) -> None:
+    monkeypatch.setattr(duffel, "post_resilient", Mock(side_effect=RuntimeError("boom")))
+    fournisseur = _fournisseur(Mock(), _config_canari())
+
+    fournisseur.verifier_canari()  # 1er echec de la chronologie
+    for _ in range(4):  # 4 echecs de plus -> 5 au total
+        with pytest.raises(ErreurFournisseur):
+            fournisseur.meilleure_offre(_route())
+
+    assert fournisseur._suspendu is True

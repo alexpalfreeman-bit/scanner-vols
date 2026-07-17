@@ -14,6 +14,7 @@ ErreurValidationReponse au lieu de produire silencieusement une Offre fausse.
 import logging
 import random
 import time
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 import requests
@@ -35,6 +36,13 @@ DUFFEL_VERSION = "v2"
 
 RETRIABLES = {429, 500, 502, 503, 504}
 ECHECS_CONSECUTIFS_MAX = 5
+
+# Route canari (AUDIT.md 2.4) : sonde la sante du fournisseur independamment
+# des destinations de config.yaml. JFK est un hub majeur avec des offres en
+# quasi-permanence - un aller simple (pas de contrainte direct_seulement)
+# pour ne pas produire de faux "0 offre" sans rapport avec la sante de l'API.
+CANARI_DESTINATION = "JFK"
+CANARI_OFFSET_SEMAINES = 4
 
 
 def creer_session_duffel(env: Env) -> requests.Session:
@@ -187,6 +195,34 @@ class FournisseurDuffel:
             raise
         self._echecs_consecutifs = 0
         return offre
+
+    def verifier_canari(self) -> bool:
+        """Sonde la route canari (AUDIT.md 2.4) : passe par meilleure_offre,
+        donc partage le meme compteur d'echecs consecutifs que les routes
+        normales - "5 echecs consecutifs" decrit une seule chronologie de
+        tentatives par run, le canari en est le premier maillon puisqu'il
+        s'execute avant la boucle de destinations. N'echoue jamais a
+        l'appelant (contrairement a meilleure_offre, qui catch precisement
+        ErreurFournisseur pour laisser remonter un vrai bug de programmation
+        - ici le contrat est explicitement "jamais crasher le run") : logge
+        un WARNING (0 offre ou n'importe quelle exception) et renvoie un
+        bool, pour un appel sans try/except cote scanner.py."""
+        route: Route = {
+            "origine": self._config["origine"],
+            "destination": CANARI_DESTINATION,
+            "date_depart": (date.today() + timedelta(weeks=CANARI_OFFSET_SEMAINES)).isoformat(),
+        }
+        try:
+            offre = self.meilleure_offre(route)
+        except Exception as e:  # sonde volontairement infaillible, voir docstring
+            logger.warning(
+                "route canari %s->%s : echec (%s)", route["origine"], CANARI_DESTINATION, e
+            )
+            return False
+        if offre is None:
+            logger.warning("route canari %s->%s : 0 offre", route["origine"], CANARI_DESTINATION)
+            return False
+        return True
 
     def _appeler(self, route: Route) -> Offre | None:
         """Note (audit 1.9) : la doc Duffel v2 confirme que
