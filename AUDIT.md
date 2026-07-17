@@ -194,15 +194,24 @@ CREATE TABLE alertes (
 CREATE UNIQUE INDEX idx_dedup ON alertes (route_id, date_depart, type);
 ```
 
-- [ ] Script `python -m scanner_vols.migrer_csv` : `data/history.csv` →
-      `data/scanner.db` (conversion en cents, calcul d'`horizon_jours`).
-- [ ] Test de migration : même nombre de lignes, sommes de contrôle identiques.
+- [x] Script `python migrer_csv.py` (layout plat, pas de package `scanner_vols` —
+      voir 2.1) : `data/history.csv` → `data/scanner.db` (conversion en cents,
+      calcul d'`horizon_jours`). Exécuté pour de vrai sur l'historique réel.
+- [x] Test de migration : même nombre de lignes, sommes de contrôle identiques
+      (`tests/test_migrer_csv.py`, + validation manuelle sur les 185 lignes
+      réelles, voir Journal).
 - [ ] `stats_routes` rafraîchie incrémentalement après chaque scan (uniquement
-      les segments touchés par les nouvelles observations).
-- [ ] Interim assumé : committer `data/scanner.db` depuis le workflow comme
+      les segments touchés par les nouvelles observations). **Reporté à la
+      Phase 2.3** (décision validée avec l'utilisateur) : le bucketing
+      (`mois_depart`/`tranche_horizon`) et les agrégats appartiennent au futur
+      moteur de détection, qu'on ne touche pas en 2.2. La table existe
+      (schéma créé par `storage.initialiser_db`) mais reste vide.
+- [x] Interim assumé : committer `data/scanner.db` depuis le workflow comme
       aujourd'hui le CSV (GitHub Actions n'a pas de disque persistant).
       Le passage à un Postgres géré est en Phase 3. Garder le SQL portable.
 - [ ] Une fois la migration validée : retirer `data/history.csv` du dépôt.
+      **En attente de confirmation explicite de l'utilisateur** (garde-fou
+      CLAUDE.md) — pas encore demandée à ce stade.
 
 ### 2.3 Moteur de détection (`detection.py`, fonctions pures)
 Remplacer la médiane toutes-dates-confondues (qui ignore la saisonnalité et
@@ -428,3 +437,54 @@ retouche tous les points d'appel de `main()`).
   `CLAUDE.md` ne faisait que ne pas encore le refléter.
 - Implémentation de 2.1 et 2.2 pas encore commencée : plan proposé à
   l'utilisateur pour validation avant d'écrire du code.
+
+### Phase 2.1 — découpage en modules (2026-07-16)
+
+- Réalisé en 6 commits atomiques (un par module + un dernier pour le
+  câblage) : `providers/duffel.py`, `storage.py` (backend CSV),
+  `detection.py`, `alerting.py`, `charger_config` déplacé dans
+  `config.py`, puis `scanner.py` réduit à l'orchestration.
+- Aucun changement de comportement : tests de Phase 1 déplacés vers les
+  fichiers de test dédiés à chaque module. Les tests de `main()` n'ont pas
+  eu à changer leurs cibles `@patch("scanner.X")` : `scanner.py` continue
+  d'importer ces noms dans son propre espace de noms.
+- Ajouts mineurs, dans l'esprit du déplacement mais hors périmètre strict :
+  tests de round-trip pour `storage.py` et un test pour `envoyer_telegram`
+  (aucun test direct n'existait avant sur ces fonctions).
+- Vérifié : `ruff check`, `ruff format --check`, `mypy` et `pytest -q`
+  (36 tests) verts ; poussé sur `refactor-audit`.
+
+### Phase 2.2 — stockage SQLite (2026-07-16)
+
+- `storage.py` bascule sur SQLite (schéma exact d'AUDIT.md, `CREATE TABLE
+  IF NOT EXISTS` pour rester idempotent). `lire_historique()` /
+  `ajouter_historique(ligne)` gardent la même signature et la même forme
+  de dict (prix en dollars flottants) qu'avec le backend CSV de 2.1 :
+  `scanner.py` et `detection.py` n'ont pas eu à rechanger.
+- Trois décisions validées avec l'utilisateur avant l'implémentation :
+  1. `stats_routes`/`alertes` : schéma créé maintenant, peuplement reporté
+     à la Phase 2.3 (bucketing et agrégats appartiennent au futur moteur
+     de détection, pas encore réécrit) ;
+  2. argent (règle CLAUDE.md, jamais de float) : conversion appliquée
+     uniquement à la frontière de `storage.py` — `scanner.py`/
+     `detection.py`/`alerting.py` restent en dollars flottants jusqu'à la
+     réécriture du moteur de détection en 2.3, pour éviter de toucher deux
+     fois les mêmes signatures ;
+  3. `providers/base.py` (Protocol) : pas créé en 2.1, réservé à la
+     Phase 2.4 (qui prévoit aussi la validation Pydantic de la réponse).
+- `migrer_csv.py` testé sur données synthétiques mélangeant l'ancien
+  format d'horodatage (pré-1.6, "AAAA-MM-JJ HH:MM") et le nouveau (ISO
+  avec fuseau) — les deux réellement présents dans `data/history.csv` —
+  puis exécuté pour de vrai sur les 185 observations réelles. Validation
+  indépendante du script (pas juste "les tests passent") : 185 lignes CSV
+  = 185 observations en base, somme de contrôle `prix_cents` identique
+  par devise (USD : 10 453 427 des deux côtés — tout l'historique actuel
+  est en USD, cohérent avec le bug 1.1). Le script refuse de tourner si
+  `data/scanner.db` contient déjà des observations (anti double-migration).
+- `scan.yml` committe désormais `data/scanner.db` au lieu de
+  `data/history.csv`.
+- `data/history.csv` n'a **pas** été supprimé du dépôt : conformément à la
+  consigne reçue et au garde-fou CLAUDE.md, la suppression attend une
+  confirmation explicite de l'utilisateur, pas encore demandée à ce stade.
+- Vérifié : `ruff check`, `ruff format --check`, `mypy` et `pytest -q`
+  (45 tests) verts ; poussé sur `refactor-audit`.
