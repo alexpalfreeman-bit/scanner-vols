@@ -328,3 +328,38 @@ def dates_voisines_a_sonder(date_depart: str, ecart_jours: int = 3) -> tuple[str
         (depart - timedelta(days=ecart_jours)).isoformat(),
         (depart + timedelta(days=ecart_jours)).isoformat(),
     )
+
+
+# ---------------------------------------------------------------- doit_alerter (2.3.d)
+
+
+def doit_alerter(
+    *,
+    route_id: int,
+    date_depart: str,
+    type_alerte: TypeAlerte,
+    prix_cents: int,
+    alerte_precedente: dict | None,
+    maintenant: datetime,
+    cooldown_heures: float = 72.0,
+    ratio_reduction_min: float = 0.90,
+) -> bool:
+    """Deduplication/cooldown (AUDIT.md 2.3d) : pas de realerte sur le meme
+    (route_id, date_depart, type) avant cooldown_heures, sauf si le nouveau
+    prix est sous ratio_reduction_min du prix deja alerte.
+
+    `alerte_precedente` est la ligne de la table `alertes` qui correspond
+    deja a cette cle (route_id, date_depart, type_alerte) - au plus une,
+    grace a l'index UNIQUE idx_dedup - ou None si aucune alerte precedente.
+    route_id/date_depart/type_alerte ne sont pas revalides contre
+    alerte_precedente (l'appelant est cense l'avoir deja filtree via cette
+    cle, ex. une clause SQL WHERE) ; ils documentent la cle au niveau de la
+    signature. `maintenant` doit etre timezone-aware (UTC)."""
+    if maintenant.tzinfo is None:
+        raise ValueError("maintenant doit etre timezone-aware (UTC)")
+    if alerte_precedente is None:
+        return True
+    age = maintenant - datetime.fromisoformat(alerte_precedente["envoyee_le"])
+    if age >= timedelta(hours=cooldown_heures):
+        return True
+    return bool(prix_cents < alerte_precedente["prix_cents"] * ratio_reduction_min)

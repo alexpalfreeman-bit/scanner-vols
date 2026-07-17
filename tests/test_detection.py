@@ -583,3 +583,100 @@ def test_dates_voisines_a_sonder_ecart_personnalise() -> None:
 
 def test_dates_voisines_a_sonder_franchissement_mois_annee() -> None:
     assert detection.dates_voisines_a_sonder("2026-01-01") == ("2025-12-29", "2026-01-04")
+
+
+# ---------------------------------------------------------------- doit_alerter (2.3.d)
+
+MAINTENANT_ALERTE = datetime(2026, 7, 3, tzinfo=UTC)
+
+
+def _alerte_precedente(
+    *,
+    route_id: int = 1,
+    date_depart: str = "2026-09-01",
+    type_alerte: str = "erreur_prix",
+    prix_cents: int = 50_000,
+    envoyee_le: str = "2026-07-01T00:00:00+00:00",
+) -> dict:
+    return {
+        "route_id": route_id,
+        "date_depart": date_depart,
+        "type": type_alerte,
+        "prix_cents": prix_cents,
+        "envoyee_le": envoyee_le,
+    }
+
+
+def _doit_alerter(alerte_precedente: dict | None, **overrides: object) -> bool:
+    parametres: dict = {
+        "route_id": 1,
+        "date_depart": "2026-09-01",
+        "type_alerte": "erreur_prix",
+        "prix_cents": 45_000,
+        "alerte_precedente": alerte_precedente,
+        "maintenant": MAINTENANT_ALERTE,
+        **overrides,
+    }
+    return detection.doit_alerter(**parametres)
+
+
+def test_doit_alerter_aucune_alerte_precedente() -> None:
+    assert _doit_alerter(None) is True
+
+
+def test_doit_alerter_dans_cooldown_prix_pas_assez_bas_pas_de_realerte() -> None:
+    precedente = _alerte_precedente(prix_cents=50_000)
+    assert _doit_alerter(precedente, prix_cents=48_000) is False  # 96% de l'ancien prix
+
+
+def test_doit_alerter_dans_cooldown_prix_nettement_plus_bas_realerte() -> None:
+    precedente = _alerte_precedente(prix_cents=50_000)
+    assert _doit_alerter(precedente, prix_cents=40_000) is True  # 80% de l'ancien prix
+
+
+def test_doit_alerter_frontiere_exacte_90_pourcent_pas_de_realerte() -> None:
+    precedente = _alerte_precedente(prix_cents=100_000)
+    assert _doit_alerter(precedente, prix_cents=90_000) is False  # pas strictement sous 90%
+
+
+def test_doit_alerter_juste_sous_90_pourcent_realerte() -> None:
+    precedente = _alerte_precedente(prix_cents=100_000)
+    assert _doit_alerter(precedente, prix_cents=89_999) is True
+
+
+def test_doit_alerter_age_exactement_72h_realerte() -> None:
+    # MAINTENANT_ALERTE (2026-07-03T00:00:00) - envoyee_le -> age 72h exactement.
+    precedente = _alerte_precedente(prix_cents=40_000, envoyee_le="2026-06-30T00:00:00+00:00")
+    assert (
+        _doit_alerter(precedente, prix_cents=45_000) is True
+    )  # prix plus haut : seul l'age compte
+
+
+def test_doit_alerter_juste_sous_72h_sans_baisse_pas_de_realerte() -> None:
+    precedente = _alerte_precedente(prix_cents=40_000, envoyee_le="2026-06-30T00:00:01+00:00")
+    assert _doit_alerter(precedente, prix_cents=45_000) is False
+
+
+def test_doit_alerter_largement_au_dela_du_cooldown_realerte_quel_que_soit_le_prix() -> None:
+    precedente = _alerte_precedente(prix_cents=1, envoyee_le="2020-01-01T00:00:00+00:00")
+    assert _doit_alerter(precedente, prix_cents=999_999) is True
+
+
+def test_doit_alerter_override_cooldown_heures() -> None:
+    # age = 24h : dans le cooldown par defaut (72h), au-dela avec cooldown_heures=12.
+    precedente = _alerte_precedente(prix_cents=40_000, envoyee_le="2026-07-02T00:00:00+00:00")
+    assert _doit_alerter(precedente, prix_cents=45_000) is False
+    assert _doit_alerter(precedente, prix_cents=45_000, cooldown_heures=12.0) is True
+
+
+def test_doit_alerter_override_ratio_reduction_min() -> None:
+    precedente = _alerte_precedente(prix_cents=50_000)
+    # 48000 = 96% de 50000 : pas de realerte au seuil par defaut (90%),
+    # mais oui avec un seuil plus permissif (97%).
+    assert _doit_alerter(precedente, prix_cents=48_000, ratio_reduction_min=0.90) is False
+    assert _doit_alerter(precedente, prix_cents=48_000, ratio_reduction_min=0.97) is True
+
+
+def test_doit_alerter_maintenant_naif_leve_erreur() -> None:
+    with pytest.raises(ValueError):
+        _doit_alerter(None, maintenant=datetime(2026, 7, 3))
