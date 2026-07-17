@@ -27,6 +27,7 @@ et fait planter silencieusement le parsing des offres).
 import csv
 import html
 import io
+import logging
 import os
 import random
 import statistics
@@ -52,6 +53,8 @@ if isinstance(sys.stderr, io.TextIOWrapper):
 
 DUFFEL_API_URL = "https://api.duffel.com"
 DUFFEL_VERSION = "v2"
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.yaml"
@@ -400,11 +403,12 @@ def horodatage_maintenant() -> str:
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     try:
         env = charger_env()
         config = valider_config(charger_config())
     except ErreurConfiguration as e:
-        print(f"[ERREUR CONFIGURATION] {e}", file=sys.stderr)
+        logger.error("Configuration invalide : %s", e)
         return 1
 
     session = creer_session_duffel(env)
@@ -417,14 +421,14 @@ def main() -> int:
         try:
             vol = chercher_meilleur_vol(session, route, config)
         except Exception as e:
-            print(f"[ERREUR API] {nom_route} : {e}", file=sys.stderr)
+            logger.error("%s : erreur API : %s", nom_route, e)
             resultats.append((nom_route, f"ERREUR API : {e}"))
             continue
         finally:
             time.sleep(0.25)
 
         if vol is None:
-            print(f"[AUCUN VOL] {nom_route}")
+            logger.warning("%s : aucun vol trouvé", nom_route)
             resultats.append((nom_route, "aucun vol trouvé"))
             continue
 
@@ -448,10 +452,11 @@ def main() -> int:
 
         raisons = []
         if route.get("prix_max") is not None and vol["devise"] != config["devise"]:
-            print(
-                f"[AVERTISSEMENT] {nom_route} : prix_max ignoré (configuré en "
-                f"{config['devise']}, offre en {vol['devise']})",
-                file=sys.stderr,
+            logger.warning(
+                "%s : prix_max ignoré (configuré en %s, offre en %s)",
+                nom_route,
+                config["devise"],
+                vol["devise"],
             )
         raison_seuil = raison_prix_max(
             vol["prix"], vol["devise"], route.get("prix_max"), config["devise"]
@@ -477,14 +482,16 @@ def main() -> int:
             message = formater_alerte(route, vol, raisons, stats)
             try:
                 envoyer_telegram(message, env)
-                print(f"[ALERTE ENVOYÉE] {nom_route} : {vol['prix']} {vol['devise']}")
+                logger.info("%s : alerte envoyée (%s %s)", nom_route, vol["prix"], vol["devise"])
                 resultats.append((nom_route, f"alerte envoyée : {vol['prix']} {vol['devise']}"))
             except Exception as e:
-                print(f"[ERREUR TELEGRAM] {nom_route} : {e}", file=sys.stderr)
+                logger.error("%s : erreur Telegram : %s", nom_route, e)
                 resultats.append((nom_route, f"ERREUR TELEGRAM : {e}"))
         else:
             mediane = f"{stats['mediane']:.0f}" if stats else "?"
-            print(f"[OK] {nom_route} : {vol['prix']} {vol['devise']} (médiane : {mediane})")
+            logger.info(
+                "%s : ok (%s %s, médiane %s)", nom_route, vol["prix"], vol["devise"], mediane
+            )
             resultats.append((nom_route, f"ok : {vol['prix']} {vol['devise']}"))
 
     ecrire_resume_github(resultats)

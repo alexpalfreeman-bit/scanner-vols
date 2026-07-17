@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 from unittest.mock import Mock, patch
 
@@ -284,3 +285,40 @@ def test_main_echoue_si_toutes_les_routes_echouent(
     chercher_vol_mock.side_effect = RuntimeError("boom")
 
     assert scanner.main() == 1
+
+
+# ---------------------------------------------------------------- logging (1.7)
+
+
+@patch("scanner.ecrire_resume_github")
+@patch("scanner.ajouter_historique")
+@patch("scanner.statistiques_destination", return_value=None)
+@patch("scanner.chercher_meilleur_vol")
+@patch("scanner.generer_candidats")
+@patch("scanner.lire_historique", return_value=[])
+@patch("scanner.creer_session_duffel")
+@patch("scanner.charger_config")
+@patch("scanner.charger_env")
+def test_erreur_api_est_loggee_en_error(
+    charger_env_mock,
+    charger_config_mock,
+    creer_session_mock,
+    lire_historique_mock,
+    generer_candidats_mock,
+    chercher_vol_mock,
+    stats_mock,
+    ajouter_historique_mock,
+    resume_mock,
+    caplog,
+) -> None:
+    charger_config_mock.return_value = _config_minimal(1)
+    generer_candidats_mock.return_value = [
+        {"origine": "YUL", "destination": "AAA", "date_depart": "2026-01-01"}
+    ]
+    chercher_vol_mock.side_effect = RuntimeError("boom")
+
+    with caplog.at_level(logging.ERROR, logger="scanner"):
+        scanner.main()
+
+    assert "boom" in caplog.text
+    assert "ERROR" in caplog.text

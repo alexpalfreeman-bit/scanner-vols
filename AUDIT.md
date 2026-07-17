@@ -108,7 +108,7 @@ def post_resilient(session: requests.Session, url: str, corps: dict,
 **Correctif** : un timestamp ISO 8601 UTC à la seconde **par observation**.
 **Test** : deux observations consécutives ont des timestamps distincts et parsables.
 
-### 1.7 Remplacer `print()` par `logging`
+### 1.7 Remplacer `print()` par `logging` ✅
 Logger structuré (module standard `logging`) : niveau INFO pour le déroulé,
 WARNING/ERROR pour les anomalies. Sortie lisible dans GitHub Actions.
 
