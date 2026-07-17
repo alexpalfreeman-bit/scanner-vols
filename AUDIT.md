@@ -133,10 +133,15 @@ sur données saines), seuls les cas d'erreur/bord sont corrigés.
 
 ## Phase 2 — Architecture, stockage, détection
 
-### 2.1 Restructuration en package
-Migrer `scanner.py` vers la structure `src/scanner_vols/` décrite dans CLAUDE.md,
-sans changement de comportement (refactor pur, couvert par les tests de Phase 1).
-Point d'entrée : `python -m scanner_vols`. Adapter `scan.yml`.
+### 2.1 Découpage en modules (layout plat, sans `src/`)
+Décision : on garde le layout plat choisi en Phase 0 (voir Journal) — pas de
+dossier `src/`, pas de package `scanner_vols/`. Éclater `scanner.py` en
+modules au niveau racine du dépôt (`providers/`, `storage.py`, `detection.py`,
+`alerting.py`, aux côtés de `config.py` déjà en place depuis 1.8), décrits
+dans CLAUDE.md. `scanner.py` devient l'orchestrateur mince et reste le point
+d'entrée : `python scanner.py` (inchangé, `scan.yml` n'a pas à changer sur ce
+point). Refactor pur, sans changement de comportement, couvert par les tests
+de Phase 1 (déplacés vers les fichiers de test correspondant à chaque module).
 
 ### 2.2 Stockage SQLite (SQL portable vers Postgres)
 Créer `storage.py` (stdlib `sqlite3`, pattern repository, transactions) avec ce schéma :
@@ -406,3 +411,20 @@ retouche tous les points d'appel de `main()`).
   structurés lisibles) et montre exactement l'avertissement devise attendu
   sur `MAD`/`CUN` — la seule différence de comportement sur données saines,
   et c'est la correction du bug 1.1, pas une régression.
+
+### Phase 2.1 — décision de layout (2026-07-16)
+
+- Confirmation explicite (demande utilisateur) : le layout plat retenu en
+  Phase 0 est définitif, pas une étape transitoire. La Phase 2.1 ne migre
+  donc pas vers `src/scanner_vols/` comme le décrivait initialement
+  CLAUDE.md — `AUDIT.md` §2.1 et l'« Architecture cible » de `CLAUDE.md` ont
+  été corrigées en conséquence (modules au niveau racine, `scanner.py` reste
+  le point d'entrée `python scanner.py`, pas de `python -m scanner_vols`).
+- Corrigé au passage : `CLAUDE.md` référençait encore `mypy src/` (Commandes
+  + Definition of done), une commande qui échoue aujourd'hui (`src/`
+  n'existe pas). La configuration réelle (`[tool.mypy].files` dans
+  `pyproject.toml`, invoquée en pratique par `mypy` sans argument, cf.
+  `ci.yml`) était déjà la source de vérité effective depuis la Phase 0 ;
+  `CLAUDE.md` ne faisait que ne pas encore le refléter.
+- Implémentation de 2.1 et 2.2 pas encore commencée : plan proposé à
+  l'utilisateur pour validation avant d'écrire du code.

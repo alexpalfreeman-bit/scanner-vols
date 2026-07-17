@@ -11,7 +11,8 @@ exécuter les phases dans l'ordre, cocher les cases au fur et à mesure.
 
 ## Conventions
 - Code, commentaires, docstrings et messages de commit en **français** (cohérent avec l'existant).
-- Python 3.12. Lint/format : `ruff`. Typage : `mypy` (mode strict raisonnable sur `src/`).
+- Python 3.12. Lint/format : `ruff`. Typage : `mypy` (mode strict raisonnable ;
+  fichiers couverts listés dans `[tool.mypy].files` de `pyproject.toml`).
 - L'argent est TOUJOURS en centimes entiers (`prix_cents: int`) accompagné d'une
   devise explicite. Jamais de `float` pour un montant.
 - `detection.py` ne contient que des **fonctions pures** : aucun réseau, aucun I/O,
@@ -24,8 +25,8 @@ exécuter les phases dans l'ordre, cocher les cases au fur et à mesure.
 - Installer (dev) : `pip install -e ".[dev]"`
 - Tests : `pytest -q`
 - Lint : `ruff check . && ruff format --check .`
-- Types : `mypy src/`
-- Lancer le scan : `python -m scanner_vols` (avant refactor : `python scanner.py`)
+- Types : `mypy` (sans argument — la liste de fichiers vient de `pyproject.toml`)
+- Lancer le scan : `python scanner.py`
 
 ## Garde-fous (IMPORTANT)
 - Ne JAMAIS lire, afficher, committer ou modifier `.env`. Aucun secret en dur,
@@ -39,19 +40,22 @@ exécuter les phases dans l'ordre, cocher les cases au fur et à mesure.
 - Un commit atomique par bloc logique, message en français expliquant le *pourquoi*.
 
 ## Architecture cible (détail en Phase 2 d'AUDIT.md)
+Layout **plat**, décidé en Phase 0 et confirmé en Phase 2.1 : pas de dossier
+`src/`, pas de package `scanner_vols/`. Chaque module vit à la racine du
+dépôt, à côté de `scanner.py` qui reste le point d'entrée (`python scanner.py`) :
 ```
-src/scanner_vols/
-├── config.py        # pydantic-settings : validation env + config au démarrage
-├── providers/       # base.py (Protocol), duffel.py (+ amadeus.py plus tard)
-├── storage.py       # SQLite (SQL portable vers Postgres), pattern repository
-├── detection.py     # fonctions pures : z-score MAD, classification, corroboration
-├── alerting.py      # Telegram : échappement HTML, déduplication, digest erreurs
-└── cli.py           # point d'entrée + __main__.py
-tests/               # test_detection.py, test_storage.py, fixtures/
+config.py       # pydantic-settings : validation env + config au démarrage (Phase 1)
+providers/      # base.py (Protocol), duffel.py (+ amadeus.py plus tard)
+storage.py      # SQLite (SQL portable vers Postgres), pattern repository
+detection.py    # fonctions pures : z-score MAD, classification, corroboration
+alerting.py     # Telegram : échappement HTML, déduplication, digest erreurs
+scanner.py      # orchestration de main() + point d'entrée CLI
+tests/          # test_config.py, test_providers.py, test_storage.py,
+                # test_detection.py, test_alerting.py, test_scanner.py, fixtures/
 ```
 
 ## Definition of done (pour CHAQUE phase)
-1. `ruff check .`, `mypy src/` et `pytest -q` passent tous, sans avertissement ignoré.
+1. `ruff check .`, `mypy` et `pytest -q` passent tous, sans avertissement ignoré.
 2. Toutes les cases de la phase sont cochées dans `AUDIT.md`.
 3. Les commits sont atomiques et poussés sur `refactor-audit`.
 4. Un court résumé de ce qui a été fait + décisions prises est ajouté en bas
