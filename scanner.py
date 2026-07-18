@@ -205,13 +205,31 @@ def _tenter_alerte(
     prix_cents: int,
     maintenant: datetime,
     env: Env,
+    environnement: str,
 ) -> tuple[bool, str | None]:
     """Recupere l'alerte precedente (dedup/cooldown) et tente l'envoi via
     alerting.envoyer_alerte ; convertit toute exception (Telegram, reseau) en
     message d'erreur plutot que de crasher le run - chacun des 3 types
     d'alerte independants (seuil/minimum/aubaine-ou-erreur_prix, AUDIT.md,
-    Journal Session A) garde son autonomie vis-a-vis des 2 autres. Retourne
-    (envoyee, erreur)."""
+    Journal Session A) garde son autonomie vis-a-vis des 2 autres.
+
+    Garde-fou sandbox/production (audit data/scanner.db, Journal) : hors
+    environnement 'production', l'alerte est supprimee avant meme la
+    verification de dedup/cooldown - ni obtenir_derniere_alerte ni
+    envoyer_alerte ne sont appeles. prix_max et est_nouveau_minimum ne
+    dependent pas de l'historique filtre (lire_historique/lire_observations),
+    donc un run sandbox/inconnu pouvait jusqu'ici declencher une vraie alerte
+    Telegram sur un prix fictif meme avec le garde-fou de storage.py en place -
+    ce garde-fou ferme ce dernier chemin. Retourne (envoyee, erreur)."""
+    if environnement != "production":
+        logger.info(
+            "%s : alerte %s non envoyee (environnement %s, pas production)",
+            route["destination"],
+            type_alerte,
+            environnement,
+        )
+        return False, None
+
     alerte_precedente = obtenir_derniere_alerte(route_id, route["date_depart"], type_alerte)
     try:
         envoyee = envoyer_alerte(
@@ -371,6 +389,7 @@ def main() -> int:
                 prix_cents=offre.prix_cents,
                 maintenant=maintenant,
                 env=env,
+                environnement=environnement,
             )
             if erreur:
                 erreurs_alerte.append(f"seuil: {erreur}")
@@ -392,6 +411,7 @@ def main() -> int:
                 prix_cents=offre.prix_cents,
                 maintenant=maintenant,
                 env=env,
+                environnement=environnement,
             )
             if erreur:
                 erreurs_alerte.append(f"minimum: {erreur}")
@@ -439,6 +459,7 @@ def main() -> int:
                 prix_cents=offre.prix_cents,
                 maintenant=maintenant,
                 env=env,
+                environnement=environnement,
             )
             if erreur:
                 erreurs_alerte.append(f"{type_alerte}: {erreur}")
@@ -460,15 +481,18 @@ def main() -> int:
 
     resume_duffel = fournisseur.resume()
     ecrire_resume_github(resultats)
-    try:
-        envoyer_digest(
-            resultats,
-            [resume_duffel],
-            env,
-            budget_corroboration_epuise=budget_corroboration_epuise,
-        )
-    except Exception as e:
-        logger.error("erreur lors de l'envoi du digest technique : %s", e)
+    if environnement == "production":
+        try:
+            envoyer_digest(
+                resultats,
+                [resume_duffel],
+                env,
+                budget_corroboration_epuise=budget_corroboration_epuise,
+            )
+        except Exception as e:
+            logger.error("erreur lors de l'envoi du digest technique : %s", e)
+    else:
+        logger.info("digest technique non envoyé (environnement %s, pas production)", environnement)
     total = len(resultats)
     echecs = sum(1 for _, r in resultats if r.startswith("ERREUR"))
     return 1 if total and echecs == total else 0
