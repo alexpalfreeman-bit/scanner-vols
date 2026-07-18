@@ -15,12 +15,12 @@ sejour:
   candidats_semaines: [13, 16, 19, 22, 25]   # décalages en semaines testés en rotation (~3 à ~6 mois à l'avance)
 
 detection:
-  seuil_bonne_affaire_pct: 0.15   # alerte si prix <= 85% de la médiane historique de la destination
-  seuil_erreur_prix_pct: 0.40     # au-delà de cette baisse, le message dit "possible erreur de prix"
   echantillon_min: 5              # nb min. d'observations avant de faire confiance à la médiane
   fenetre_tendance: 5             # nb d'observations récentes vs anciennes comparées pour la tendance
   variation_tendance_pct: 0.05    # +/-5% = seuil pour déclarer hausse/baisse vs stable
   marge_minimum_pct: 0.03         # "nouveau minimum" seulement si prix < min historique - 3%, et n >= echantillon_min
+  corroboration_activee: false           # true = re-interroge Duffel pour confirmer un candidat "erreur de prix" avant d'alerter comme tel (sinon redescend en "bonne affaire")
+  corroboration_max_requetes_par_run: 15  # plafond de requêtes Duffel supplémentaires consommées par la corroboration, partagé par tout le run
 
 # Chaque destination : juste un code IATA, ou un objet avec prix_max /
 # direct_seulement en plus si tu veux un seuil fixe ou exiger un vol direct.

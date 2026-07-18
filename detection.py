@@ -108,7 +108,7 @@ def raison_prix_max(
 NiveauEchantillon = Literal["route_mois_horizon", "route_mois", "route"]
 Classification = Literal["candidat_erreur_prix", "bonne_affaire", "normal", "donnees_insuffisantes"]
 VerdictCorroboration = Literal["erreur_prix", "bonne_affaire"]
-TypeAlerte = Literal["aubaine", "erreur_prix", "minimum"]
+TypeAlerte = Literal["aubaine", "erreur_prix", "minimum", "seuil"]
 
 
 # ---------------------------------------------------------------- echantillon_comparable (2.3.a)

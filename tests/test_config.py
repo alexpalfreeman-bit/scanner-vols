@@ -35,7 +35,7 @@ def test_valider_config_seuil_hors_bornes_leve_erreur() -> None:
     brut = {
         "origine": "YUL",
         "devise": "CAD",
-        "detection": {"seuil_bonne_affaire_pct": 1.5},
+        "detection": {"marge_minimum_pct": 1.5},
         "destinations": [{"code": "CDG"}],
     }
     with pytest.raises(config.ErreurConfiguration):

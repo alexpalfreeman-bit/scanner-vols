@@ -78,12 +78,16 @@ class Sejour(BaseModel):
 
 
 class Detection(BaseModel):
-    seuil_bonne_affaire_pct: float = Field(gt=0, lt=1, default=0.15)
-    seuil_erreur_prix_pct: float = Field(gt=0, lt=1, default=0.40)
     echantillon_min: int = Field(gt=0, default=5)
     fenetre_tendance: int = Field(gt=0, default=5)
     variation_tendance_pct: float = Field(gt=0, lt=1, default=0.05)
     marge_minimum_pct: float = Field(gt=0, lt=1, default=0.03)
+    corroboration_activee: bool = False
+    # Plafond conservateur (AUDIT.md Session B) : rarement atteint en usage
+    # normal (candidat_erreur_prix suppose un z-score <= -3.5, deja rare),
+    # sert de garde-fou anti-run-pathologique plutot que de levier de tuning
+    # courant - meme raisonnement que SEUIL_TAUX_ZERO_OFFRES (providers/duffel.py).
+    corroboration_max_requetes_par_run: int = Field(gt=0, default=15)
 
 
 class ConfigApp(BaseModel):
