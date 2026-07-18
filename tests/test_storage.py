@@ -64,6 +64,7 @@ def test_inserer_observation_calcule_horizon_jours(tmp_path, monkeypatch) -> Non
         devise="USD",
         compagnie="Test Air",
         escales=0,
+        environnement="production",
     )
     conn.commit()
 
@@ -97,6 +98,7 @@ def test_enregistrer_observation_puis_lire_historique_round_trip(tmp_path, monke
         devise="USD",
         compagnie="Test Air",
         escales=0,
+        environnement="production",
     )
     lignes = storage.lire_historique()
 
@@ -120,6 +122,7 @@ def test_enregistrer_observation_retourne_meme_route_id_deuxieme_appel(
         "devise": "USD",
         "compagnie": "Test Air",
         "escales": 0,
+        "environnement": "production",
     }
 
     id1 = storage.enregistrer_observation(observe_le="2026-01-01T00:00:00+00:00", **base)
@@ -141,6 +144,7 @@ def test_enregistrer_observation_sans_date_retour(tmp_path, monkeypatch) -> None
         devise="USD",
         compagnie="Test Air",
         escales=0,
+        environnement="production",
     )
     lignes = storage.lire_historique()
 
@@ -157,6 +161,7 @@ def test_enregistrer_observation_deux_observations_meme_route(tmp_path, monkeypa
         "devise": "USD",
         "compagnie": "Test Air",
         "escales": 0,
+        "environnement": "production",
     }
 
     storage.enregistrer_observation(
@@ -184,6 +189,7 @@ def test_enregistrer_observation_cree_le_dossier_parent(tmp_path, monkeypatch) -
         devise="USD",
         compagnie="Test Air",
         escales=0,
+        environnement="production",
     )
 
     assert chemin.exists()
@@ -210,6 +216,7 @@ def test_lire_observations_forme_native_centimes(tmp_path, monkeypatch) -> None:
         devise="USD",
         compagnie="Test Air",
         escales=0,
+        environnement="production",
     )
 
     lignes = storage.lire_observations()
@@ -239,6 +246,7 @@ def test_lire_observations_plusieurs_routes_et_devises(tmp_path, monkeypatch) ->
         devise="USD",
         compagnie="Test Air",
         escales=0,
+        environnement="production",
     )
     storage.enregistrer_observation(
         origine="YUL",
@@ -250,6 +258,7 @@ def test_lire_observations_plusieurs_routes_et_devises(tmp_path, monkeypatch) ->
         devise="CAD",
         compagnie="Test Air",
         escales=1,
+        environnement="production",
     )
 
     lignes = storage.lire_observations()
@@ -257,6 +266,77 @@ def test_lire_observations_plusieurs_routes_et_devises(tmp_path, monkeypatch) ->
     assert len(lignes) == 2
     assert {ligne["prix_cents"] for ligne in lignes} == {50000, 60000}
     assert {ligne["devise"] for ligne in lignes} == {"USD", "CAD"}
+
+
+# ---------------------------------------------------------------- garde-fou environnement (audit data/scanner.db)
+
+
+def _observation_environnement(**overrides: object) -> dict:
+    base: dict = {
+        "origine": "YUL",
+        "destination": "CDG",
+        "observe_le": "2026-01-01T00:00:00+00:00",
+        "date_depart": "2026-06-01",
+        "date_retour": None,
+        "prix_cents": 50000,
+        "devise": "USD",
+        "compagnie": "Test Air",
+        "escales": 0,
+        "environnement": "production",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_lire_observations_exclut_sandbox(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    storage.enregistrer_observation(**_observation_environnement(environnement="sandbox"))
+
+    assert storage.lire_observations() == []
+
+
+def test_lire_observations_exclut_inconnu(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    storage.enregistrer_observation(**_observation_environnement(environnement="inconnu"))
+
+    assert storage.lire_observations() == []
+
+
+def test_lire_observations_melange_ne_renvoie_que_la_production(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    storage.enregistrer_observation(
+        **_observation_environnement(environnement="production", prix_cents=50000)
+    )
+    storage.enregistrer_observation(
+        **_observation_environnement(environnement="sandbox", prix_cents=99999)
+    )
+
+    lignes = storage.lire_observations()
+
+    assert len(lignes) == 1
+    assert lignes[0]["prix_cents"] == 50000
+
+
+def test_lire_historique_exclut_sandbox(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    storage.enregistrer_observation(**_observation_environnement(environnement="sandbox"))
+
+    assert storage.lire_historique() == []
+
+
+def test_lire_historique_melange_ne_renvoie_que_la_production(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    storage.enregistrer_observation(
+        **_observation_environnement(environnement="production", prix_cents=50000)
+    )
+    storage.enregistrer_observation(
+        **_observation_environnement(environnement="inconnu", prix_cents=99999)
+    )
+
+    lignes = storage.lire_historique()
+
+    assert len(lignes) == 1
+    assert lignes[0]["prix"] == pytest.approx(500.0)
 
 
 def test_lire_observations_normalise_observe_le_naif_en_utc(tmp_path, monkeypatch) -> None:
@@ -277,6 +357,7 @@ def test_lire_observations_normalise_observe_le_naif_en_utc(tmp_path, monkeypatc
         devise="USD",
         compagnie="Test Air",
         escales=0,
+        environnement="production",
     )
     conn.commit()
     conn.close()

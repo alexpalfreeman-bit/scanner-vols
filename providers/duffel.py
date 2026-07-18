@@ -16,6 +16,7 @@ import random
 import time
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Literal
 
 import requests
 from pydantic import BaseModel, ConfigDict, Field
@@ -53,6 +54,23 @@ APPELS_REUSSIS_MIN_POUR_AVERTISSEMENT = 5
 # pour ne pas produire de faux "0 offre" sans rapport avec la sante de l'API.
 CANARI_DESTINATION = "JFK"
 CANARI_OFFSET_SEMAINES = 4
+
+EnvironnementDuffel = Literal["sandbox", "production", "inconnu"]
+
+
+def environnement_duffel(token: str) -> EnvironnementDuffel:
+    """Classifie le token Duffel par son prefixe (convention documentee par
+    Duffel et par le README : duffel_test_ = sandbox, duffel_live_ =
+    production). "production" seulement si le prefixe duffel_live_ est
+    explicitement present - jamais par defaut - pour qu'une observation ne
+    soit jamais etiquetee "production" a tort (audit data/scanner.db,
+    Journal : la totalite de la base s'est revelee sandbox, faute d'une
+    verification comme celle-ci)."""
+    if token.startswith("duffel_live_"):
+        return "production"
+    if token.startswith("duffel_test_"):
+        return "sandbox"
+    return "inconnu"
 
 
 def creer_session_duffel(env: Env) -> requests.Session:

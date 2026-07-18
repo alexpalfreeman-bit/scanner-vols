@@ -10,6 +10,14 @@ Interface repository, deux familles de lecture/ecriture cote a cote (Phase
   le nouveau moteur (detection.echantillon_comparable) ;
 - obtenir_derniere_alerte()/enregistrer_alerte() : dedup/cooldown (table
   alertes) pour detection.doit_alerter, cote alerting.envoyer_alerte.
+
+Garde-fou sandbox/production (audit data/scanner.db, cf. Journal) : chaque
+observation porte sa colonne `environnement` (valeur calculee par
+providers.duffel.environnement_duffel a partir du prefixe du token, jamais
+devinee ici). lire_historique()/lire_observations() ne renvoient JAMAIS que
+les observations `environnement = 'production'` : les runs sandbox/inconnus
+continuent de s'inserer normalement (utile pour tester en local) mais ne
+peuvent jamais atteindre le moteur de detection statistique.
 """
 
 import sqlite3
@@ -18,9 +26,6 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
 DB_FILE = BASE_DIR / "data" / "scanner.db"
-
-# Conserve uniquement pour migrer_csv.py (migration ponctuelle, voir AUDIT.md 2.2).
-HISTORY_FILE = BASE_DIR / "data" / "history.csv"
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS routes (
@@ -42,7 +47,8 @@ CREATE TABLE IF NOT EXISTS observations (
   compagnie     TEXT,
   escales       INTEGER,
   cabine        TEXT NOT NULL DEFAULT 'economy',
-  fournisseur   TEXT NOT NULL DEFAULT 'duffel'
+  fournisseur   TEXT NOT NULL DEFAULT 'duffel',
+  environnement TEXT NOT NULL DEFAULT 'inconnu'
 );
 CREATE INDEX IF NOT EXISTS idx_obs_lookup ON observations (route_id, date_depart, observe_le);
 
@@ -118,14 +124,20 @@ def inserer_observation(
     devise: str,
     compagnie: str | None,
     escales: int | None,
+    environnement: str,
 ) -> None:
     """N'effectue pas le commit : a la charge de l'appelant (permet d'inserer
-    plusieurs observations dans une seule transaction, ex. migrer_csv.py)."""
+    plusieurs observations dans une seule transaction).
+
+    environnement (pas de defaut : parametre obligatoire, comme prix_cents)
+    doit venir de providers.duffel.environnement_duffel - jamais devine ni
+    laisse a 'production' par reflexe, exactement le bug constate a l'audit
+    (donnees sandbox committees sans etiquette, contaminant la detection)."""
     conn.execute(
         "INSERT INTO observations "
         "(route_id, observe_le, date_depart, date_retour, horizon_jours, "
-        " prix_cents, devise, compagnie, escales) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " prix_cents, devise, compagnie, escales, environnement) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             route_id,
             observe_le,
@@ -136,6 +148,7 @@ def inserer_observation(
             devise,
             compagnie,
             escales,
+            environnement,
         ),
     )
 
@@ -147,6 +160,7 @@ def lire_historique() -> list[dict]:
             "SELECT r.origine, r.destination, o.observe_le, o.date_depart, o.date_retour, "
             "       o.prix_cents, o.devise, o.compagnie, o.escales "
             "FROM observations o JOIN routes r ON r.id = o.route_id "
+            "WHERE o.environnement = 'production' "
             "ORDER BY o.observe_le"
         ).fetchall()
     finally:
@@ -178,11 +192,14 @@ def enregistrer_observation(
     devise: str,
     compagnie: str | None,
     escales: int | None,
+    environnement: str,
 ) -> int:
     """Cree-ou-recupere la route puis insere l'observation (centimes natifs,
     aucun aller-retour par les dollars flottants) ; retourne route_id, dont
     le moteur de detection (echantillon_comparable) et la dedup d'alertes
-    (obtenir_derniere_alerte/enregistrer_alerte) ont besoin en aval."""
+    (obtenir_derniere_alerte/enregistrer_alerte) ont besoin en aval.
+
+    environnement : voir inserer_observation - obligatoire, jamais devine."""
     conn = obtenir_connexion()
     try:
         route_id = obtenir_ou_creer_route(conn, origine, destination)
@@ -196,6 +213,7 @@ def enregistrer_observation(
             devise=devise,
             compagnie=compagnie,
             escales=escales,
+            environnement=environnement,
         )
         conn.commit()
         return route_id
@@ -223,12 +241,14 @@ def lire_observations() -> list[dict]:
     """Lecture native (prix_cents entiers, sans jointure) : alimente
     detection.echantillon_comparable, qui filtre lui-meme par route_id/
     devise/recence sur la liste complete (meme pattern que lire_historique,
-    un seul fetch avant la boucle des routes - voir scanner.py)."""
+    un seul fetch avant la boucle des routes - voir scanner.py). Ne renvoie
+    que les observations `environnement = 'production'` (voir docstring du
+    module)."""
     conn = obtenir_connexion()
     try:
         lignes = conn.execute(
             "SELECT route_id, devise, observe_le, date_depart, horizon_jours, prix_cents "
-            "FROM observations"
+            "FROM observations WHERE environnement = 'production'"
         ).fetchall()
     finally:
         conn.close()

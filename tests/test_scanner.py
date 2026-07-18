@@ -208,6 +208,7 @@ def test_main_appelle_envoyer_digest_avec_le_resume_du_fournisseur(
     part) : un bug qui passerait resumes=[] par erreur resterait invisible
     si on ne verifiait que digest_necessaire/formater_digest isolement (deja
     testes a fond dans test_alerting.py)."""
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test123"
     charger_config_mock.return_value = _config_minimal(1)
     generer_candidats_mock.return_value = [
         {"origine": "YUL", "destination": "AAA", "date_depart": "2026-01-01"}
@@ -263,6 +264,185 @@ def test_erreur_api_est_loggee_en_error(
 
     assert "boom" in caplog.text
     assert "ERROR" in caplog.text
+
+
+# ---------------------------------------------------------------- environnement Duffel (audit data/scanner.db)
+
+
+@patch("scanner.envoyer_digest")
+@patch("scanner.ecrire_resume_github")
+@patch("scanner.enregistrer_observation", return_value=1)
+@patch("scanner.statistiques_destination", return_value=None)
+@patch("scanner.generer_candidats")
+@patch("scanner.lire_observations", return_value=[])
+@patch("scanner.lire_historique", return_value=[])
+@patch("scanner.FournisseurDuffel")
+@patch("scanner.charger_config")
+@patch("scanner.charger_env")
+def test_main_logge_avertissement_si_token_sandbox(
+    charger_env_mock,
+    charger_config_mock,
+    fournisseur_classe_mock,
+    lire_historique_mock,
+    lire_observations_mock,
+    generer_candidats_mock,
+    stats_mock,
+    enregistrer_observation_mock,
+    resume_mock,
+    envoyer_digest_mock,
+    caplog,
+) -> None:
+    charger_env_mock.return_value.duffel_access_token = "duffel_test_abc123"
+    charger_config_mock.return_value = _config_minimal(1)
+    generer_candidats_mock.return_value = [
+        {"origine": "YUL", "destination": "AAA", "date_depart": "2026-01-01"}
+    ]
+    fournisseur_classe_mock.return_value.meilleure_offre.return_value = _offre_sans_alerte()
+
+    with caplog.at_level(logging.WARNING, logger="scanner"):
+        scanner.main()
+
+    assert "sandbox" in caplog.text
+    assert "WARNING" in caplog.text
+
+
+@patch("scanner.envoyer_digest")
+@patch("scanner.ecrire_resume_github")
+@patch("scanner.enregistrer_observation", return_value=1)
+@patch("scanner.statistiques_destination", return_value=None)
+@patch("scanner.generer_candidats")
+@patch("scanner.lire_observations", return_value=[])
+@patch("scanner.lire_historique", return_value=[])
+@patch("scanner.FournisseurDuffel")
+@patch("scanner.charger_config")
+@patch("scanner.charger_env")
+def test_main_pas_davertissement_si_token_production(
+    charger_env_mock,
+    charger_config_mock,
+    fournisseur_classe_mock,
+    lire_historique_mock,
+    lire_observations_mock,
+    generer_candidats_mock,
+    stats_mock,
+    enregistrer_observation_mock,
+    resume_mock,
+    envoyer_digest_mock,
+    caplog,
+) -> None:
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_abc123"
+    charger_config_mock.return_value = _config_minimal(1)
+    generer_candidats_mock.return_value = [
+        {"origine": "YUL", "destination": "AAA", "date_depart": "2026-01-01"}
+    ]
+    fournisseur_classe_mock.return_value.meilleure_offre.return_value = _offre_sans_alerte()
+
+    with caplog.at_level(logging.INFO, logger="scanner"):
+        scanner.main()
+
+    assert "environnement Duffel detecte : production" in caplog.text
+    assert "WARNING" not in caplog.text
+
+
+@patch("scanner.envoyer_digest")
+@patch("scanner.ecrire_resume_github")
+@patch("scanner.statistiques_destination", return_value=None)
+@patch("scanner.generer_candidats")
+@patch("scanner.lire_observations", return_value=[])
+@patch("scanner.lire_historique", return_value=[])
+@patch("scanner.FournisseurDuffel")
+@patch("scanner.charger_config")
+@patch("scanner.charger_env")
+@patch("scanner.enregistrer_observation", return_value=1)
+def test_main_transmet_environnement_a_enregistrer_observation(
+    enregistrer_observation_mock,
+    charger_env_mock,
+    charger_config_mock,
+    fournisseur_classe_mock,
+    lire_historique_mock,
+    lire_observations_mock,
+    generer_candidats_mock,
+    stats_mock,
+    ecrire_resume_mock,
+    envoyer_digest_mock,
+) -> None:
+    charger_env_mock.return_value.duffel_access_token = "duffel_test_abc123"
+    charger_config_mock.return_value = _config_minimal(1)
+    generer_candidats_mock.return_value = [
+        {"origine": "YUL", "destination": "AAA", "date_depart": "2026-01-01"}
+    ]
+    fournisseur_classe_mock.return_value.meilleure_offre.return_value = _offre_sans_alerte()
+
+    scanner.main()
+
+    assert enregistrer_observation_mock.call_args.kwargs["environnement"] == "sandbox"
+
+
+# ---------------------------------------------------------------- _tenter_alerte : garde-fou environnement
+
+
+def _params_tenter_alerte(**overrides: object) -> dict:
+    base: dict = {
+        "route": {"origine": "YUL", "destination": "CDG", "date_depart": "2026-09-01"},
+        "vol": {"prix": 350.0, "devise": "USD", "compagnie": "Test Air", "escales": 0},
+        "stats": None,
+        "route_id": 1,
+        "type_alerte": "seuil",
+        "raisons": ["sous le seuil"],
+        "prix_cents": 35_000,
+        "maintenant": datetime(2026, 7, 18, tzinfo=UTC),
+        "env": Mock(),
+        "environnement": "production",
+    }
+    base.update(overrides)
+    return base
+
+
+@patch("scanner.envoyer_alerte")
+@patch("scanner.obtenir_derniere_alerte")
+def test_tenter_alerte_sandbox_ne_verifie_ni_envoie_rien(
+    obtenir_derniere_alerte_mock, envoyer_alerte_mock
+) -> None:
+    resultat = scanner._tenter_alerte(**_params_tenter_alerte(environnement="sandbox"))
+
+    assert resultat == (False, None)
+    obtenir_derniere_alerte_mock.assert_not_called()
+    envoyer_alerte_mock.assert_not_called()
+
+
+@patch("scanner.envoyer_alerte")
+@patch("scanner.obtenir_derniere_alerte")
+def test_tenter_alerte_inconnu_ne_verifie_ni_envoie_rien(
+    obtenir_derniere_alerte_mock, envoyer_alerte_mock
+) -> None:
+    resultat = scanner._tenter_alerte(**_params_tenter_alerte(environnement="inconnu"))
+
+    assert resultat == (False, None)
+    obtenir_derniere_alerte_mock.assert_not_called()
+    envoyer_alerte_mock.assert_not_called()
+
+
+@patch("scanner.envoyer_alerte")
+@patch("scanner.obtenir_derniere_alerte", return_value=None)
+def test_tenter_alerte_production_fonctionne_normalement(
+    obtenir_derniere_alerte_mock, envoyer_alerte_mock
+) -> None:
+    envoyer_alerte_mock.return_value = True
+
+    resultat = scanner._tenter_alerte(**_params_tenter_alerte(environnement="production"))
+
+    assert resultat == (True, None)
+    obtenir_derniere_alerte_mock.assert_called_once()
+    envoyer_alerte_mock.assert_called_once()
+
+
+def test_tenter_alerte_sandbox_logge_la_suppression(caplog) -> None:
+    with caplog.at_level(logging.INFO, logger="scanner"):
+        scanner._tenter_alerte(
+            **_params_tenter_alerte(environnement="sandbox", type_alerte="minimum")
+        )
+
+    assert "minimum" in caplog.text
+    assert "sandbox" in caplog.text
 
 
 # ---------------------------------------------------------------- classification z-score (Session A/B)
@@ -546,6 +726,7 @@ def _peupler_echantillon(
             devise=devise,
             compagnie="Test Air",
             escales=0,
+            environnement="production",
         )
     return route_id
 
@@ -592,6 +773,7 @@ def test_e2e_trois_types_alerte_independants_envoyes_et_persistes(
     independamment - preuve de bout en bout des 3 messages independants avec
     leur propre dedup (AUDIT.md, Journal Session A/B)."""
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     route_id = _peupler_echantillon("YUL", "CDG", "2026-01-01")
 
     charger_config_mock.return_value = _config_e2e()
@@ -624,6 +806,7 @@ def test_e2e_deuxieme_run_rapproche_meme_prix_ne_realerte_pas(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     _peupler_echantillon("YUL", "CDG", "2026-01-01")
 
     charger_config_mock.return_value = _config_e2e()
@@ -655,6 +838,7 @@ def test_e2e_candidat_erreur_prix_corroboration_desactivee_downgrade_aubaine(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     route_id = _peupler_echantillon("YUL", "CDG", "2026-01-01")
 
     charger_config_mock.return_value = _config_e2e(corroboration_activee=False)
@@ -689,6 +873,7 @@ def test_e2e_candidat_erreur_prix_corroboration_activee_confirmee_bonus(
     """Budget large, signaux 1 et 2 tous confirmants (memes valeurs que
     tests/test_detection.py::_signaux_avec) : verdict erreur_prix persiste."""
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     monkeypatch.setattr(scanner.time, "sleep", lambda *_: None)
     route_id = _peupler_echantillon("YUL", "CDG", "2026-01-01")
 
@@ -732,6 +917,7 @@ def test_e2e_corroboration_activee_budget_insuffisant_downgrade_aubaine(
     budget) - or signal_1 seul ne confirme jamais (AUDIT.md 2.3c), le
     verdict retrograde donc systematiquement en aubaine."""
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     monkeypatch.setattr(scanner.time, "sleep", lambda *_: None)
     route_id = _peupler_echantillon("YUL", "CDG", "2026-01-01")
 
@@ -772,6 +958,7 @@ def test_e2e_budget_corroboration_partage_entre_routes_et_signale_au_digest(
     signale (WARNING + budget_corroboration_epuise transmis au digest),
     AUDIT.md Session B (ajustement utilisateur)."""
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     monkeypatch.setattr(scanner.time, "sleep", lambda *_: None)
     route_id_cdg = _peupler_echantillon("YUL", "CDG", "2026-01-01")
     route_id_lhr = _peupler_echantillon("YUL", "LHR", "2026-01-01")
@@ -822,6 +1009,7 @@ def test_e2e_telegram_echoue_aucune_alerte_persistee(
     Telegram echoue, rien n'est ecrit dans la table alertes - sinon le
     cooldown de 72h supprimerait une alerte legitime jamais recue."""
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     route_id = _peupler_echantillon("YUL", "CDG", "2026-01-01")
 
     charger_config_mock.return_value = _config_e2e()
@@ -834,3 +1022,71 @@ def test_e2e_telegram_echoue_aucune_alerte_persistee(
     assert resultat == 1  # la seule route du run echoue (3 alertes, 3 echecs Telegram)
     for type_alerte in ("seuil", "minimum", "aubaine"):
         assert storage.obtenir_derniere_alerte(route_id, "2026-09-01", type_alerte) is None
+
+
+@patch("alerting.envoyer_telegram")
+@patch("scanner.ecrire_resume_github")
+@patch("scanner.generer_candidats")
+@patch("scanner.FournisseurDuffel")
+@patch("scanner.charger_config")
+@patch("scanner.charger_env")
+def test_e2e_sandbox_ne_declenche_aucune_alerte_meme_si_tout_declencherait(
+    charger_env_mock,
+    charger_config_mock,
+    fournisseur_classe_mock,
+    generer_candidats_mock,
+    ecrire_resume_mock,
+    telegram_mock,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Faille corrigee (audit data/scanner.db, Journal) : prix_max et
+    est_nouveau_minimum ne dependent pas de l'historique filtre, donc le
+    garde-fou storage.py seul ne suffisait pas - meme scenario que
+    test_e2e_trois_types_alerte_independants_envoyes_et_persistes (les 3
+    types declencheraient normalement), mais avec un token sandbox : aucun
+    appel Telegram, aucune persistance."""
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_test_sandbox123"
+    route_id = _peupler_echantillon("YUL", "CDG", "2026-01-01")
+
+    charger_config_mock.return_value = _config_e2e()
+    generer_candidats_mock.return_value = [_route_e2e(prix_max=360)]
+    fournisseur_classe_mock.return_value.meilleure_offre.return_value = _offre_e2e(35_000)
+
+    resultat = scanner.main()
+
+    telegram_mock.assert_not_called()
+    assert resultat == 0
+    for type_alerte in ("seuil", "minimum", "aubaine"):
+        assert storage.obtenir_derniere_alerte(route_id, "2026-09-01", type_alerte) is None
+
+
+@patch("alerting.envoyer_telegram")
+@patch("scanner.ecrire_resume_github")
+@patch("scanner.generer_candidats")
+@patch("scanner.FournisseurDuffel")
+@patch("scanner.charger_config")
+@patch("scanner.charger_env")
+def test_e2e_sandbox_ne_envoie_pas_le_digest_meme_avec_erreur(
+    charger_env_mock,
+    charger_config_mock,
+    fournisseur_classe_mock,
+    generer_candidats_mock,
+    ecrire_resume_mock,
+    telegram_mock,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Le digest technique est lui aussi suppime hors environnement
+    production, meme quand digest_necessaire serait vrai (route en erreur)."""
+    monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_test_sandbox123"
+
+    charger_config_mock.return_value = _config_e2e()
+    generer_candidats_mock.return_value = [_route_e2e()]
+    fournisseur_classe_mock.return_value.meilleure_offre.side_effect = RuntimeError("boom")
+
+    scanner.main()
+
+    telegram_mock.assert_not_called()

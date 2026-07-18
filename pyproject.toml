@@ -27,7 +27,7 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["scanner", "config", "storage", "detection", "alerting", "migrer_csv"]
+py-modules = ["scanner", "config", "storage", "detection", "alerting"]
 packages = ["providers"]
 
 [tool.ruff]
@@ -50,7 +50,6 @@ files = [
   "storage.py",
   "detection.py",
   "alerting.py",
-  "migrer_csv.py",
   "providers",
 ]
 disallow_untyped_defs = true
