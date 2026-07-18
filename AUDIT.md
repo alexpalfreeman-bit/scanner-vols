@@ -1128,5 +1128,110 @@ préalables explicitement demandées par l'utilisateur, faites avant tout code :
   dans les mêmes commits n'a pas été supposé).
 - Vérifié : `ruff check .`, `ruff format --check .`, `mypy` et `pytest -q`
   tous verts (232 tests) sur l'ensemble du dépôt.
-  contourné via `python -m pytest`, qui utilise le bon interpréteur ;
-  `ruff`/`mypy` ne sont pas affectés.
+
+### Audit sandbox/production de data/scanner.db (2026-07-18)
+
+Demande explicite de l'utilisateur, après le merge de `refactor-audit` dans
+`master` : auditer `data/scanner.db` pour une éventuelle contamination par
+des runs sandbox, donner la liste avant toute suppression, puis ajouter un
+garde-fou permanent. Travaillé sur une **nouvelle branche
+`fix-sandbox-environnement`** (pas sur `master` : le garde-fou CLAUDE.md
+"ne jamais committer sur main" s'applique toujours une fois `refactor-audit`
+mergée — `refactor-audit` elle-même reste dédiée à ce refactor déjà terminé,
+donc nouvelle branche plutôt que réutilisation du nom).
+
+**Audit — résultat plus large que prévu.** Preuve définitive et
+irréfutable : **100 % des 260 observations (la totalité, pas une portion)
+sont en vol direct (escales=0)**, y compris vers des destinations où un
+nonstop depuis YUL est physiquement impossible (Sydney, Fidji, Auckland, Le
+Cap, Johannesburg, Nairobi — vérifié route par route, 7/7 direct partout,
+aucune exception). Aucune combinaison de compagnies réelles ne produit ce
+résultat ; c'est la signature du bac à sable Duffel, qui simule
+systématiquement des vols directs quelle que soit la faisabilité réelle.
+
+En remontant l'historique git de `data/scanner.db` (2 commits au total,
+jamais par `scanner-bot`/la CI, toujours par l'utilisateur) : 185 lignes de
+la migration Phase 2.2 (reprises de `data/history.csv`, donc du cron
+pré-refactor sur `master`) + 75 lignes d'un commit explicitement étiqueté
+« vérification locale Session A ». Découverte annexe expliquant pourquoi
+même les données « migrées » sont sandbox : **les workflows `on: schedule`
+de GitHub Actions ne se déclenchent que depuis la branche par défaut du
+dépôt** (`master`) — jamais depuis une branche de travail. Le `scan.yml`
+durci de `refactor-audit` n'a donc *jamais* tourné par cron ; le seul
+run CI mentionné au Journal (Phase 0) était un `workflow_dispatch` manuel,
+antérieur à l'existence de `data/scanner.db`. Le token utilisé par le cron
+historique sur `master` (celui qui a produit `data/history.csv`) était donc
+lui aussi sandbox — aucune ligne de la base n'a jamais été réelle.
+
+Décisions utilisateur (2 questions posées, les deux recommandations
+retenues) :
+1. **Vider la base** (`observations`/`alertes`/`stats_routes`, `routes`
+   conservée - pas de donnée prix, aucune raison de la vider) plutôt que
+   tagger rétroactivement les 260 lignes existantes : aucune n'est
+   exploitable pour la détection.
+2. **Tag + filtrage** plutôt que refus d'écriture : le `.env` local est
+   actuellement sandbox, un refus total aurait bloqué toute vérification
+   locale (le README documente explicitement ce mode comme un usage normal
+   pendant le développement) ; le tag laisse les runs sandbox s'insérer
+   normalement (utile pour tester) sans jamais atteindre le moteur de
+   détection.
+
+**Implémentation du garde-fou** :
+- `providers/duffel.py::environnement_duffel(token) -> Literal["sandbox",
+  "production", "inconnu"]` : classification par préfixe (convention
+  Duffel/README, `duffel_live_`/`duffel_test_`). "production" *seulement*
+  sur préfixe exact - jamais par défaut, pour qu'une observation ne soit
+  jamais étiquetée "production" à tort (exactement le trou qui a permis la
+  contamination initiale). N'a jamais lu ni affiché le contenu de `.env`
+  (garde-fou CLAUDE.md) : seul le préfixe du token, déjà lu par le code
+  applicatif via `Env`/`pydantic-settings` comme il le fait déjà pour
+  fonctionner, est inspecté - jamais par Claude Code directement.
+- `storage.py` : colonne `observations.environnement TEXT NOT NULL DEFAULT
+  'inconnu'` (schéma). `enregistrer_observation`/`inserer_observation`
+  l'exigent désormais en paramètre obligatoire (pas de défaut, comme
+  `prix_cents` - un appelant qui l'oublie doit lever une erreur explicite,
+  jamais deviner silencieusement). `lire_historique()` ET
+  `lire_observations()` filtrent toutes deux `WHERE environnement =
+  'production'` : les deux moteurs de détection (Phase 1
+  `statistiques_destination`/`est_nouveau_minimum`, et le moteur z-score)
+  sont protégés de la même façon, pas seulement le second - la
+  contamination aurait pu emprunter l'une ou l'autre porte.
+- `scanner.py::main()` : calcule l'environnement une fois au démarrage
+  (`environnement_duffel(env.duffel_access_token)`), le journalise (INFO si
+  production, WARNING sinon - visibilité opérationnelle immédiate dans les
+  logs), le transmet à chaque `enregistrer_observation`.
+- `migrer_csv.py` : tague `'inconnu'` (le CSV source ne trace pas le token
+  d'origine de chaque ligne - ne pas deviner 'production' a posteriori
+  seulement parce qu'on soupçonne aujourd'hui que c'était sandbox, ce
+  script reste générique). **Note pour l'utilisateur** : ce script est
+  désormais du code mort au sens strict - `data/history.csv` n'existe plus
+  nulle part (ni sur `refactor-audit` depuis la Phase 2.2, ni sur `master`
+  depuis ce merge), le script échoue systématiquement à sa première ligne
+  (`HISTORY_FILE` introuvable). Pas supprimé cette session (hors du
+  périmètre demandé, décision non prise unilatéralement) - à trancher
+  séparément si souhaité.
+- **Base réelle** : vidée et migrée (260 → 0 observations, `routes`
+  conservée à 37 lignes, `observations` recréée avec la colonne
+  `environnement` via `storage.initialiser_db`, `VACUUM` exécuté). Vérifié
+  après coup : `lire_observations()`/`lire_historique()` retournent `[]`
+  sans erreur sur la base fraîche.
+- Tests : 14 nouveaux (5 `environnement_duffel` dans `test_providers.py` ;
+  7 dans `test_storage.py` - exclusion sandbox/inconnu, mélange
+  production+autre sur les deux lecteurs ; 3 dans `test_scanner.py` - log
+  WARNING/INFO selon l'environnement, transmission correcte à
+  `enregistrer_observation` ; 1 dans `test_migrer_csv.py` - tag 'inconnu'
+  et exclusion de `lire_historique`), plus mise à jour de tous les appels
+  existants à `enregistrer_observation`/`inserer_observation` dans
+  `tests/test_storage.py`/`tests/test_scanner.py` (nouveau paramètre
+  obligatoire). Piège identifié et corrigé avant qu'il ne fausse un test :
+  `charger_env_mock.return_value.duffel_access_token` non configuré est un
+  `MagicMock` dont `.startswith(...)` renvoie un autre `MagicMock` -
+  toujours vrai par défaut (même piège que `resume.suspendu` en Session B) ;
+  les 7 tests de bout en bout configurent désormais explicitement ce champ
+  plutôt que de dépendre de cette troncature accidentelle.
+- Corrigé au passage : un fragment de texte dupliqué en toute fin de
+  fichier, laissé par une édition imprécise du Journal Session B (bug
+  d'édition, sans rapport avec le contenu - la duplication ne changeait
+  rien au sens, juste une répétition orpheline en queue de fichier).
+- Vérifié : `ruff check .`, `ruff format --check .`, `mypy` et `pytest -q`
+  tous verts (246 tests) sur l'ensemble du dépôt.
