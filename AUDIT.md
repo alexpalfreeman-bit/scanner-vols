@@ -1235,3 +1235,56 @@ retenues) :
   rien au sens, juste une répétition orpheline en queue de fichier).
 - Vérifié : `ruff check .`, `ruff format --check .`, `mypy` et `pytest -q`
   tous verts (246 tests) sur l'ensemble du dépôt.
+
+### Faille du garde-fou : le chemin d'alerte, pas seulement l'historique (2026-07-18)
+
+Faille identifiée par l'utilisateur juste après l'audit précédent :
+`raison_prix_max` (type `seuil`) ne lit aucun historique - juste le prix de
+l'offre courante contre un seuil fixe de `config.yaml` - et
+`est_nouveau_minimum` (type `minimum`) ne s'appuie sur l'historique filtré
+que par accident (base vide au moment de l'audit ⇒ `stats is None` ⇒
+`False` systématique, pas une garantie une fois de vraies données
+présentes). Le garde-fou de la session précédente (filtrage
+`environnement = 'production'` dans `storage.lire_historique()`/
+`lire_observations()`) protège les DONNÉES COMPARATIVES, pas la DÉCISION
+D'ENVOYER : un run sandbox pouvait donc encore déclencher un vrai message
+Telegram sur un prix fictif, sur les 3 types d'alerte (le chemin z-score
+aussi, puisque rien ne conditionnait l'envoi lui-même à l'environnement du
+run courant).
+
+- **`scanner.py::_tenter_alerte`** : nouveau paramètre obligatoire
+  `environnement`. Hors `'production'`, l'alerte est supprimée **avant**
+  `obtenir_derniere_alerte`/`envoyer_alerte` (aucune lecture ni écriture,
+  aucun appel Telegram), avec un log INFO nommant le type d'alerte et
+  l'environnement détecté. Point de garde unique (les 3 types d'alerte
+  passent par ce helper) plutôt que dupliqué à 3 sites d'appel - impossible
+  qu'un futur 4ᵉ type d'alerte oublie le garde-fou.
+- **Digest technique** : même traitement en fin de `main()` -
+  `envoyer_digest` n'est appelé que si `environnement == 'production'`,
+  sinon log INFO. La corroboration elle-même (signaux 1/2, requêtes
+  réseau) continue de tourner hors production : elle ne persiste rien et
+  n'envoie rien par elle-même (décision Session B), le garde-fou porte
+  uniquement sur l'envoi final.
+- Tests : 4 unitaires sur `_tenter_alerte` (sandbox/inconnu ne vérifient ni
+  n'envoient rien, production fonctionne normalement, log de suppression),
+  2 de bout en bout (le scénario exact de
+  `test_e2e_trois_types_alerte_independants_envoyes_et_persistes` mais avec
+  un token sandbox : zéro appel Telegram, zéro persistance ; digest
+  supprimé même avec une route en erreur). Corrigé au passage :
+  `test_main_appelle_envoyer_digest_avec_le_resume_du_fournisseur`
+  dépendait implicitement de la troncature `MagicMock` sur
+  `duffel_access_token` (même piège que `resume.suspendu` en Session B) -
+  configure désormais explicitement un token `duffel_live_`.
+
+### Retrait de migrer_csv.py (code mort strict)
+
+`data/history.csv` n'existe plus nulle part (Phase 2.2 sur `refactor-audit`,
+puis le merge sur `master`) : le script échouait systématiquement à sa
+première ligne. Retiré avec son fichier de test
+(`tests/test_migrer_csv.py`) ; `storage.HISTORY_FILE` (n'existait que pour
+lui) retiré aussi. Références nettoyées dans `pyproject.toml`
+(`py-modules`, `[tool.mypy].files`). Historique conservé par git si besoin
+(`git show <commit>:migrer_csv.py`).
+
+Vérifié : `ruff check .`, `ruff format --check .`, `mypy` et `pytest -q`
+tous verts (247 tests) sur l'ensemble du dépôt.
