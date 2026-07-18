@@ -1,0 +1,338 @@
+"""
+Fournisseur Duffel (API v2, HTTP direct)
+------------------------------------------
+Note technique : on appelle l'API Duffel directement en HTTP (pas via le
+package PyPI "duffel-api", qui n'a pas ete mis a jour pour l'API v2 de Duffel
+et fait planter silencieusement le parsing des offres).
+
+FournisseurDuffel implemente le contrat FournisseurVols (providers/base.py) :
+la reponse Duffel est validee via des modeles Pydantic prives avant toute
+extraction (AUDIT.md 2.4) - un changement de schema cote Duffel leve
+ErreurValidationReponse au lieu de produire silencieusement une Offre fausse.
+"""
+
+import logging
+import random
+import time
+from datetime import date, timedelta
+from decimal import ROUND_HALF_UP, Decimal
+
+import requests
+from pydantic import BaseModel, ConfigDict, Field
+
+from config import Env
+from providers.base import (
+    ErreurFournisseur,
+    ErreurFournisseurSuspendu,
+    ErreurValidationReponse,
+    Offre,
+    ResumeFournisseur,
+    Route,
+)
+
+logger = logging.getLogger(__name__)
+
+DUFFEL_API_URL = "https://api.duffel.com"
+DUFFEL_VERSION = "v2"
+
+RETRIABLES = {429, 500, 502, 503, 504}
+ECHECS_CONSECUTIFS_MAX = 5
+
+# Seuil d'avertissement sur le taux de reponses "0 offre" (AUDIT.md 2.4).
+# Non specifie par AUDIT.md : point de depart conservateur assume (peu de
+# faux positifs pour un tout nouveau mecanisme), comme seuil_chute_pct en
+# Phase 2.3 - resume() logge le taux reel en INFO a chaque run, pas
+# seulement au franchissement du seuil, pour accumuler l'historique
+# empirique qui permettrait de le recalibrer plus tard.
+SEUIL_TAUX_ZERO_OFFRES = 0.5
+APPELS_REUSSIS_MIN_POUR_AVERTISSEMENT = 5
+
+# Route canari (AUDIT.md 2.4) : sonde la sante du fournisseur independamment
+# des destinations de config.yaml. JFK est un hub majeur avec des offres en
+# quasi-permanence - un aller simple (pas de contrainte direct_seulement)
+# pour ne pas produire de faux "0 offre" sans rapport avec la sante de l'API.
+CANARI_DESTINATION = "JFK"
+CANARI_OFFSET_SEMAINES = 4
+
+
+def creer_session_duffel(env: Env) -> requests.Session:
+    session = requests.Session()
+    session.headers.update(
+        {
+            "Authorization": f"Bearer {env.duffel_access_token}",
+            "Duffel-Version": DUFFEL_VERSION,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+    )
+    return session
+
+
+def post_resilient(
+    session: requests.Session, url: str, corps: dict, essais: int = 4
+) -> requests.Response:
+    """POST avec retry/backoff exponentiel (+ jitter) sur timeout, erreurs
+    reseau, ou codes HTTP transitoires (429/5xx) ; respecte Retry-After s'il
+    est present. Une erreur non transitoire (4xx hors 429) est retournee
+    immediatement, sans retry."""
+    derniere_erreur: Exception = RuntimeError("aucune tentative")
+    for tentative in range(essais):
+        attente = (2**tentative) + random.uniform(0, 1)
+        try:
+            r = session.post(url, json=corps, timeout=30)
+            if r.status_code not in RETRIABLES:
+                return r
+            attente = max(attente, float(r.headers.get("Retry-After", 0)))
+            derniere_erreur = RuntimeError(f"HTTP {r.status_code} sur {url}")
+        except requests.RequestException as e:
+            derniere_erreur = e
+        if tentative < essais - 1:
+            time.sleep(attente)
+    raise derniere_erreur
+
+
+def extraire_message_erreur(r: requests.Response) -> str:
+    """Message d'erreur lisible a partir d'une reponse HTTP en echec. Si le
+    corps n'est pas du JSON exploitable (ex. page HTML d'un 502), on retombe
+    sur le code HTTP + le debut du corps plutot que de laisser JSONDecodeError
+    masquer l'erreur reelle."""
+    try:
+        erreur = (r.json().get("errors") or [{}])[0]
+        return f"{erreur.get('type')}: {erreur.get('title')}: {erreur.get('message')}"
+    except (ValueError, KeyError, AttributeError, IndexError, TypeError):
+        return f"HTTP {r.status_code} : {r.text[:200]}"
+
+
+# ---------------------------------------------------------------- validation Pydantic (2.4)
+
+
+class _ModeleDuffel(BaseModel):
+    """Base commune : tout champ de la reponse Duffel qu'on ne modelise pas
+    ici est ignore (comportement par defaut de Pydantic), pas rejete - on ne
+    valide que ce qu'on consomme reellement. Explicite via ConfigDict plutot
+    que laisse implicite, pour qu'un futur relecteur ne se demande pas si
+    extra="forbid" a ete oublie."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class _CompagnieDuffel(_ModeleDuffel):
+    name: str
+
+
+class _SegmentDuffel(_ModeleDuffel):
+    operating_carrier: _CompagnieDuffel | None = None
+    marketing_carrier: _CompagnieDuffel | None = None
+
+
+class _TrajetDuffel(_ModeleDuffel):
+    # min_length=1 : une slice sans segment ferait silencieusement calculer
+    # escales = -1 en aval (max(escales, len([])-1)) - exactement le genre de
+    # donnee fausse silencieuse qu'AUDIT.md demande d'empecher.
+    segments: list[_SegmentDuffel] = Field(min_length=1)
+
+
+class _OffreDuffel(_ModeleDuffel):
+    # Decimal, pas float : Duffel renvoie une string decimale ("532.10"),
+    # Pydantic la parse nativement sans passer par l'arithmetique flottante
+    # (regle CLAUDE.md : jamais de float pour un montant).
+    total_amount: Decimal
+    total_currency: str = Field(min_length=3, max_length=3)
+    slices: list[_TrajetDuffel] = Field(min_length=1)
+
+
+class _DonneesReponseOffres(_ModeleDuffel):
+    # list | None (pas Field(default_factory=list)) : tolere aussi bien une
+    # cle "offers" absente qu'une valeur explicitement null, comme le fait
+    # le code actuel avec `or []`.
+    offers: list[_OffreDuffel] | None = None
+
+
+class _ReponseOffreRequest(_ModeleDuffel):
+    data: _DonneesReponseOffres
+
+
+def _centimes_depuis_montant(montant: Decimal) -> int:
+    return int((montant * 100).to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def _compagnie_depuis_segment(segment: _SegmentDuffel) -> str:
+    """Nom complet de la compagnie operante (exige par la reglementation US),
+    repli sur la compagnie commerciale si absente, puis "?" si aucune des
+    deux n'est renseignee."""
+    if segment.operating_carrier is not None:
+        return segment.operating_carrier.name
+    if segment.marketing_carrier is not None:
+        return segment.marketing_carrier.name
+    return "?"
+
+
+# ---------------------------------------------------------------- FournisseurDuffel
+
+
+class FournisseurDuffel:
+    """Fournisseur Duffel : implemente FournisseurVols (providers/base.py)."""
+
+    nom = "duffel"
+
+    def __init__(self, env: Env, config: dict, *, session: requests.Session | None = None) -> None:
+        self._session = session or creer_session_duffel(env)
+        self._config = config
+        self._echecs_consecutifs = 0  # remis a 0 a chaque succes -> pilote le circuit breaker
+        self._echecs_cumules = 0  # jamais remis a 0 -> pilote resume().echecs_total
+        self._suspendu = False
+        self._appels_reussis = 0
+        self._appels_zero_offres = 0
+
+    def meilleure_offre(self, route: Route) -> Offre | None:
+        """Circuit breaker (AUDIT.md 2.4) : suspend le fournisseur pour le
+        reste du run apres ECHECS_CONSECUTIFS_MAX echecs d'affilee. Une fois
+        suspendu, aucun appel reseau n'est tente : leve immediatement."""
+        if self._suspendu:
+            raise ErreurFournisseurSuspendu(
+                f"{self.nom} suspendu apres {ECHECS_CONSECUTIFS_MAX} echecs consecutifs"
+            )
+        try:
+            offre = self._appeler(route)
+        except ErreurFournisseur:
+            self._echecs_consecutifs += 1
+            self._echecs_cumules += 1
+            if self._echecs_consecutifs >= ECHECS_CONSECUTIFS_MAX:
+                self._suspendu = True
+                logger.warning(
+                    "%s : suspendu pour le reste du run (%d echecs consecutifs)",
+                    self.nom,
+                    self._echecs_consecutifs,
+                )
+            raise
+        self._echecs_consecutifs = 0
+        self._appels_reussis += 1
+        if offre is None:
+            self._appels_zero_offres += 1
+        return offre
+
+    def resume(self) -> ResumeFournisseur:
+        """Snapshot de fin de run (AUDIT.md 2.4), a appeler une fois apres la
+        boucle de destinations - logge le taux de reponses "0 offre" en INFO
+        systematiquement, et en plus en WARNING s'il depasse
+        SEUIL_TAUX_ZERO_OFFRES (avec un minimum d'appels reussis pour eviter
+        le bruit sur un petit run)."""
+        if self._appels_reussis >= APPELS_REUSSIS_MIN_POUR_AVERTISSEMENT:
+            taux = self._appels_zero_offres / self._appels_reussis
+            logger.info(
+                "%s : taux de reponses 0-offre %.0f%% (%d/%d)",
+                self.nom,
+                taux * 100,
+                self._appels_zero_offres,
+                self._appels_reussis,
+            )
+            if taux > SEUIL_TAUX_ZERO_OFFRES:
+                logger.warning(
+                    "%s : taux de reponses 0-offre anormalement eleve (%.0f%%, seuil %.0f%%)",
+                    self.nom,
+                    taux * 100,
+                    SEUIL_TAUX_ZERO_OFFRES * 100,
+                )
+        return ResumeFournisseur(
+            nom=self.nom,
+            appels_reussis=self._appels_reussis,
+            appels_zero_offres=self._appels_zero_offres,
+            echecs_total=self._echecs_cumules,
+            suspendu=self._suspendu,
+        )
+
+    def verifier_canari(self) -> bool:
+        """Sonde la route canari (AUDIT.md 2.4) : passe par meilleure_offre,
+        donc partage le meme compteur d'echecs consecutifs que les routes
+        normales - "5 echecs consecutifs" decrit une seule chronologie de
+        tentatives par run, le canari en est le premier maillon puisqu'il
+        s'execute avant la boucle de destinations. N'echoue jamais a
+        l'appelant (contrairement a meilleure_offre, qui catch precisement
+        ErreurFournisseur pour laisser remonter un vrai bug de programmation
+        - ici le contrat est explicitement "jamais crasher le run") : logge
+        un WARNING (0 offre ou n'importe quelle exception) et renvoie un
+        bool, pour un appel sans try/except cote scanner.py."""
+        route: Route = {
+            "origine": self._config["origine"],
+            "destination": CANARI_DESTINATION,
+            "date_depart": (date.today() + timedelta(weeks=CANARI_OFFSET_SEMAINES)).isoformat(),
+        }
+        try:
+            offre = self.meilleure_offre(route)
+        except Exception as e:  # sonde volontairement infaillible, voir docstring
+            logger.warning(
+                "route canari %s->%s : echec (%s)", route["origine"], CANARI_DESTINATION, e
+            )
+            return False
+        if offre is None:
+            logger.warning("route canari %s->%s : 0 offre", route["origine"], CANARI_DESTINATION)
+            return False
+        return True
+
+    def _appeler(self, route: Route) -> Offre | None:
+        """Note (audit 1.9) : la doc Duffel v2 confirme que
+        `return_offers=true` embarque "all the offers returned by the
+        airlines" dans la reponse de creation - pas de troncature
+        documentee. Le tri cote client via min() reste donc correct."""
+        # Une "slice" = un trajet (aller). Un aller-retour = deux slices.
+        slices = [
+            {
+                "origin": route["origine"],
+                "destination": route["destination"],
+                "departure_date": str(route["date_depart"]),
+            }
+        ]
+        if route.get("date_retour"):
+            slices.append(
+                {
+                    "origin": route["destination"],
+                    "destination": route["origine"],
+                    "departure_date": str(route["date_retour"]),
+                }
+            )
+
+        passengers = [{"type": "adult"} for _ in range(self._config.get("adultes", 1))]
+        body = {
+            "data": {
+                "cabin_class": self._config.get("classe", "economy"),
+                "passengers": passengers,
+                "slices": slices,
+                "max_connections": 0 if route.get("direct_seulement") else 1,
+            }
+        }
+
+        try:
+            r = post_resilient(
+                self._session, f"{DUFFEL_API_URL}/air/offer_requests?return_offers=true", body
+            )
+        except (requests.RequestException, RuntimeError) as e:
+            raise ErreurFournisseur(str(e)) from e
+        if not r.ok:
+            raise ErreurFournisseur(extraire_message_erreur(r))
+
+        try:
+            reponse = _ReponseOffreRequest.model_validate(r.json())
+        except ValueError as e:
+            # ValueError capture a la fois JSONDecodeError (corps non-JSON,
+            # herite de ValueError) et pydantic.ValidationError (idem) : un
+            # changement de schema Duffel leve donc toujours une erreur
+            # explicite ici, jamais une extraction silencieusement fausse.
+            raise ErreurValidationReponse(
+                f"reponse Duffel invalide (schema inattendu) : {e}"
+            ) from e
+
+        offres = reponse.data.offers or []
+        if not offres:
+            return None
+
+        meilleure = min(offres, key=lambda o: o.total_amount)
+        escales = max(len(sl.segments) - 1 for sl in meilleure.slices)
+        premier_segment = meilleure.slices[0].segments[0]
+
+        return Offre(
+            prix_cents=_centimes_depuis_montant(meilleure.total_amount),
+            devise=meilleure.total_currency,
+            compagnie=_compagnie_depuis_segment(premier_segment),
+            escales=escales,
+            fournisseur=self.nom,
+        )

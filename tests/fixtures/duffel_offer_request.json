@@ -1,0 +1,238 @@
+{
+  "data": {
+    "id": "orq_0000AqSpZjxKPnzUq1oYLb",
+    "live_mode": false,
+    "created_at": "2026-07-10T14:32:01.000Z",
+    "cabin_class": "economy",
+    "passengers": [{"id": "pas_0000AqSpZjxKPnzUq1oYLc", "type": "adult"}],
+    "slices": [
+      {"origin": "YUL", "destination": "CDG", "departure_date": "2026-11-15"},
+      {"origin": "CDG", "destination": "YUL", "departure_date": "2026-11-27"}
+    ],
+    "offers": [
+      {
+        "id": "off_0000AqSpZjxKPnzUq1oYAA",
+        "live_mode": false,
+        "created_at": "2026-07-10T14:32:02.000Z",
+        "expires_at": "2026-07-10T14:52:02.000Z",
+        "total_amount": "532.10",
+        "total_currency": "USD",
+        "base_amount": "480.00",
+        "base_currency": "USD",
+        "tax_amount": "52.10",
+        "tax_currency": "USD",
+        "owner": {"id": "arl_00009VME7D6ivUu8dn35Q2", "name": "Air Canada", "iata_code": "AC"},
+        "passengers": [{"id": "pas_0000AqSpZjxKPnzUq1oYLc", "type": "adult"}],
+        "conditions": {"refund_before_departure": null, "change_before_departure": null},
+        "slices": [
+          {
+            "id": "sli_0000AqSpZjxKPnzUq1oYA1",
+            "origin_type": "airport",
+            "destination_type": "airport",
+            "duration": "PT7H10M",
+            "origin": {"iata_code": "YUL", "name": "Montréal-Trudeau", "city_name": "Montreal"},
+            "destination": {"iata_code": "CDG", "name": "Charles de Gaulle", "city_name": "Paris"},
+            "segments": [
+              {
+                "id": "seg_0000AqSpZjxKPnzUq1oYA2",
+                "origin": {"iata_code": "YUL", "name": "Montréal-Trudeau"},
+                "destination": {"iata_code": "CDG", "name": "Charles de Gaulle"},
+                "departing_at": "2026-11-15T18:20:00",
+                "arriving_at": "2026-11-16T07:30:00",
+                "duration": "PT7H10M",
+                "distance": "5541.0",
+                "aircraft": {"id": "arc_00009UhD4ymXQz9Qav57vd", "name": "Airbus A330-300"},
+                "operating_carrier": {"id": "arl_00009VME7D6ivUu8dn35Q2", "name": "Air Canada", "iata_code": "AC"},
+                "operating_carrier_flight_number": "870",
+                "marketing_carrier": {"id": "arl_00009VME7D6ivUu8dn35Q2", "name": "Air Canada", "iata_code": "AC"},
+                "marketing_carrier_flight_number": "870"
+              }
+            ]
+          },
+          {
+            "id": "sli_0000AqSpZjxKPnzUq1oYA3",
+            "origin_type": "airport",
+            "destination_type": "airport",
+            "duration": "PT8H35M",
+            "origin": {"iata_code": "CDG", "name": "Charles de Gaulle"},
+            "destination": {"iata_code": "YUL", "name": "Montréal-Trudeau"},
+            "segments": [
+              {
+                "id": "seg_0000AqSpZjxKPnzUq1oYA4",
+                "origin": {"iata_code": "CDG", "name": "Charles de Gaulle"},
+                "destination": {"iata_code": "YUL", "name": "Montréal-Trudeau"},
+                "departing_at": "2026-11-27T10:15:00",
+                "arriving_at": "2026-11-27T12:50:00",
+                "duration": "PT8H35M",
+                "distance": "5541.0",
+                "aircraft": {"id": "arc_00009UhD4ymXQz9Qav57vd", "name": "Airbus A330-300"},
+                "operating_carrier": {"id": "arl_00009VME7D6ivUu8dn35Q2", "name": "Air Canada", "iata_code": "AC"},
+                "operating_carrier_flight_number": "871",
+                "marketing_carrier": {"id": "arl_00009VME7D6ivUu8dn35Q2", "name": "Air Canada", "iata_code": "AC"},
+                "marketing_carrier_flight_number": "871"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "off_0000AqSpZjxKPnzUq1oYBB",
+        "live_mode": false,
+        "created_at": "2026-07-10T14:32:02.000Z",
+        "expires_at": "2026-07-10T14:52:02.000Z",
+        "total_amount": "412.30",
+        "total_currency": "USD",
+        "base_amount": "365.00",
+        "base_currency": "USD",
+        "tax_amount": "47.30",
+        "tax_currency": "USD",
+        "owner": {"id": "arl_00009VME7D6ivUu8dn35Q9", "name": "United Airlines", "iata_code": "UA"},
+        "passengers": [{"id": "pas_0000AqSpZjxKPnzUq1oYLc", "type": "adult"}],
+        "conditions": {"refund_before_departure": null, "change_before_departure": null},
+        "slices": [
+          {
+            "id": "sli_0000AqSpZjxKPnzUq1oYB1",
+            "origin_type": "airport",
+            "destination_type": "airport",
+            "duration": "PT7H55M",
+            "origin": {"iata_code": "YUL", "name": "Montréal-Trudeau"},
+            "destination": {"iata_code": "CDG", "name": "Charles de Gaulle"},
+            "segments": [
+              {
+                "id": "seg_0000AqSpZjxKPnzUq1oYB2",
+                "origin": {"iata_code": "YUL", "name": "Montréal-Trudeau"},
+                "destination": {"iata_code": "CDG", "name": "Charles de Gaulle"},
+                "departing_at": "2026-11-15T21:05:00",
+                "arriving_at": "2026-11-16T09:00:00",
+                "duration": "PT7H55M",
+                "distance": "5541.0",
+                "aircraft": {"id": "arc_00009UhD4ymXQz9Qav57ve", "name": "Boeing 787-9"},
+                "operating_carrier": {"id": "arl_00009VME7D6ivUu8dn35Q9", "name": "United Airlines", "iata_code": "UA"},
+                "operating_carrier_flight_number": "58",
+                "marketing_carrier": {"id": "arl_00009VME7D6ivUu8dn35Q9", "name": "United Airlines", "iata_code": "UA"},
+                "marketing_carrier_flight_number": "58"
+              }
+            ]
+          },
+          {
+            "id": "sli_0000AqSpZjxKPnzUq1oYB3",
+            "origin_type": "airport",
+            "destination_type": "airport",
+            "duration": "PT13H20M",
+            "origin": {"iata_code": "CDG", "name": "Charles de Gaulle"},
+            "destination": {"iata_code": "YUL", "name": "Montréal-Trudeau"},
+            "segments": [
+              {
+                "id": "seg_0000AqSpZjxKPnzUq1oYB4",
+                "origin": {"iata_code": "CDG", "name": "Charles de Gaulle"},
+                "destination": {"iata_code": "EWR", "name": "Newark Liberty"},
+                "departing_at": "2026-11-27T09:30:00",
+                "arriving_at": "2026-11-27T12:10:00",
+                "duration": "PT8H40M",
+                "distance": "5850.0",
+                "aircraft": {"id": "arc_00009UhD4ymXQz9Qav57ve", "name": "Boeing 787-9"},
+                "operating_carrier": {"id": "arl_00009VME7D6ivUu8dn35Q9", "name": "United Airlines", "iata_code": "UA"},
+                "operating_carrier_flight_number": "57",
+                "marketing_carrier": {"id": "arl_00009VME7D6ivUu8dn35Q9", "name": "United Airlines", "iata_code": "UA"},
+                "marketing_carrier_flight_number": "57"
+              },
+              {
+                "id": "seg_0000AqSpZjxKPnzUq1oYB5",
+                "origin": {"iata_code": "EWR", "name": "Newark Liberty"},
+                "destination": {"iata_code": "YUL", "name": "Montréal-Trudeau"},
+                "departing_at": "2026-11-27T15:20:00",
+                "arriving_at": "2026-11-27T16:50:00",
+                "duration": "PT1H30M",
+                "distance": "530.0",
+                "aircraft": {"id": "arc_00009UhD4ymXQz9Qav57vf", "name": "Embraer E175"},
+                "operating_carrier": {"id": "arl_00009VME7D6ivUu8dn35R1", "name": "United Express", "iata_code": "UA"},
+                "operating_carrier_flight_number": "4412",
+                "marketing_carrier": {"id": "arl_00009VME7D6ivUu8dn35Q9", "name": "United Airlines", "iata_code": "UA"},
+                "marketing_carrier_flight_number": "4412"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "off_0000AqSpZjxKPnzUq1oYCC",
+        "live_mode": false,
+        "created_at": "2026-07-10T14:32:02.000Z",
+        "expires_at": "2026-07-10T14:52:02.000Z",
+        "total_amount": "601.00",
+        "total_currency": "USD",
+        "base_amount": "540.00",
+        "base_currency": "USD",
+        "tax_amount": "61.00",
+        "tax_currency": "USD",
+        "owner": {"id": "arl_00009VME7D6ivUu8dn35S3", "name": "Lufthansa", "iata_code": "LH"},
+        "passengers": [{"id": "pas_0000AqSpZjxKPnzUq1oYLc", "type": "adult"}],
+        "conditions": {"refund_before_departure": null, "change_before_departure": null},
+        "slices": [
+          {
+            "id": "sli_0000AqSpZjxKPnzUq1oYC1",
+            "origin_type": "airport",
+            "destination_type": "airport",
+            "duration": "PT11H05M",
+            "origin": {"iata_code": "YUL", "name": "Montréal-Trudeau"},
+            "destination": {"iata_code": "CDG", "name": "Charles de Gaulle"},
+            "segments": [
+              {
+                "id": "seg_0000AqSpZjxKPnzUq1oYC2",
+                "origin": {"iata_code": "YUL", "name": "Montréal-Trudeau"},
+                "destination": {"iata_code": "FRA", "name": "Frankfurt am Main"},
+                "departing_at": "2026-11-15T19:10:00",
+                "arriving_at": "2026-11-16T08:05:00",
+                "duration": "PT7H55M",
+                "distance": "6115.0",
+                "aircraft": {"id": "arc_00009UhD4ymXQz9Qav57vg", "name": "Airbus A340-300"},
+                "operating_carrier": {"id": "arl_00009VME7D6ivUu8dn35S3", "name": "Lufthansa", "iata_code": "LH"},
+                "operating_carrier_flight_number": "471",
+                "marketing_carrier": {"id": "arl_00009VME7D6ivUu8dn35S3", "name": "Lufthansa", "iata_code": "LH"},
+                "marketing_carrier_flight_number": "471"
+              },
+              {
+                "id": "seg_0000AqSpZjxKPnzUq1oYC3",
+                "origin": {"iata_code": "FRA", "name": "Frankfurt am Main"},
+                "destination": {"iata_code": "CDG", "name": "Charles de Gaulle"},
+                "departing_at": "2026-11-16T09:40:00",
+                "arriving_at": "2026-11-16T11:15:00",
+                "duration": "PT1H35M",
+                "distance": "480.0",
+                "aircraft": {"id": "arc_00009UhD4ymXQz9Qav57vh", "name": "Airbus A320"},
+                "operating_carrier": {"id": "arl_00009VME7D6ivUu8dn35S3", "name": "Lufthansa", "iata_code": "LH"},
+                "operating_carrier_flight_number": "1042",
+                "marketing_carrier": {"id": "arl_00009VME7D6ivUu8dn35S3", "name": "Lufthansa", "iata_code": "LH"},
+                "marketing_carrier_flight_number": "1042"
+              }
+            ]
+          },
+          {
+            "id": "sli_0000AqSpZjxKPnzUq1oYC4",
+            "origin_type": "airport",
+            "destination_type": "airport",
+            "duration": "PT10H50M",
+            "origin": {"iata_code": "CDG", "name": "Charles de Gaulle"},
+            "destination": {"iata_code": "YUL", "name": "Montréal-Trudeau"},
+            "segments": [
+              {
+                "id": "seg_0000AqSpZjxKPnzUq1oYC5",
+                "origin": {"iata_code": "CDG", "name": "Charles de Gaulle"},
+                "destination": {"iata_code": "YUL", "name": "Montréal-Trudeau"},
+                "departing_at": "2026-11-27T13:25:00",
+                "arriving_at": "2026-11-27T15:35:00",
+                "duration": "PT9H10M",
+                "distance": "5541.0",
+                "aircraft": {"id": "arc_00009UhD4ymXQz9Qav57vg", "name": "Airbus A340-300"},
+                "operating_carrier": {"id": "arl_00009VME7D6ivUu8dn35S3", "name": "Lufthansa", "iata_code": "LH"},
+                "operating_carrier_flight_number": "472",
+                "marketing_carrier": {"id": "arl_00009VME7D6ivUu8dn35S3", "name": "Lufthansa", "iata_code": "LH"},
+                "marketing_carrier_flight_number": "472"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

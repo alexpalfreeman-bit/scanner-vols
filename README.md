@@ -6,9 +6,11 @@ Surveille automatiquement le prix des vols vers une liste mondiale de destinatio
 
 Depuis une seule origine (`YUL` par défaut) et pour chaque destination de la liste mondiale de `config.yaml`, `scanner.py` teste **une date de départ candidate par run**, choisie en rotation dans une fenêtre de ~3 à ~6 mois à l'avance (voir `sejour.candidats_semaines`) pour un séjour de `sejour.duree_nuits` nuits. Chaque destination cycle automatiquement à travers toutes les dates candidates au fil des jours — élargir la fenêtre de dates ne coûte rien de plus, ça prend juste plus de temps à couvrir.
 
-Le prix trouvé est enregistré dans `data/history.csv`, puis comparé à l'historique de **cette destination** (toutes dates confondues) : médiane, minimum, et tendance récente vs ancienne. Une alerte Telegram part si le prix est un nouveau minimum, s'il est nettement sous la médiane (bonne affaire, ou possible erreur de prix si l'écart est très grand), ou s'il passe sous un seuil fixe optionnel (`prix_max`) que tu peux définir par destination. GitHub Actions relance le script une fois par jour, gratuitement, sans serveur.
+Le prix trouvé est enregistré dans `data/scanner.db` (SQLite), puis comparé à l'historique de **cette destination** (toutes dates confondues) : médiane, minimum, et tendance récente vs ancienne. Une alerte Telegram part si le prix est un nouveau minimum, s'il est nettement sous la médiane (bonne affaire, ou possible erreur de prix si l'écart est très grand), ou s'il passe sous un seuil fixe optionnel (`prix_max`) que tu peux définir par destination. GitHub Actions relance le script une fois par jour, gratuitement, sans serveur.
 
-Comme il n'y a pas d'historique au départ, la détection statistique démarre "à froid" (elle ne se déclenche qu'après `detection.echantillon_min` observations pour une destination) mais s'améliore ensuite automatiquement à mesure que `data/history.csv` grossit.
+Comme il n'y a pas d'historique au départ, la détection statistique démarre "à froid" (elle ne se déclenche qu'après `detection.echantillon_min` observations pour une destination) mais s'améliore ensuite automatiquement à mesure que `data/scanner.db` grossit.
+
+**Devise :** `config.yaml` déclare une `devise` (ex. `CAD`), mais Duffel renvoie toujours le prix dans la devise propre de l'offre — qui dépend du compte (souvent USD en sandbox), pas d'un paramètre qu'on peut forcer. Le scanner ne compare donc jamais deux prix de devises différentes : l'historique d'une destination est filtré par devise, et un seuil fixe (`prix_max`) n'est pris en compte que si l'offre est bien dans la devise déclarée — sinon un avertissement est loggé et cette observation est ignorée pour ce seuil précis (elle reste dans l'historique).
 
 ---
 
@@ -30,10 +32,10 @@ Comme il n'y a pas d'historique au départ, la détection statistique démarre "
 
 ## Étape 3 — Test en local (15 min)
 
-Prérequis : Python 3.11+.
+Prérequis : Python 3.12+.
 
 ```bash
-pip install -r requirements.txt
+pip install -e ".[dev]"
 cp .env.example .env      # Windows : copy .env.example .env
 ```
 
@@ -56,7 +58,7 @@ En mode test, ne te fie pas aux prix — vérifie seulement que ça tourne et qu
 
 GitHub désactive les workflows planifiés après ~60 jours d'inactivité humaine sur le dépôt — un commit occasionnel les garde en vie.
 
-**Dépôt public :** ce projet est fait pour être partagé — chacun clone le dépôt et fait tourner sa propre instance avec ses propres secrets (jamais les tiens : `.env` est exclu par `.gitignore` et les secrets GitHub Actions ne sont jamais exposés dans les logs). Par contre `data/history.csv` sera visible publiquement dans le dépôt une fois committé — pas de donnée sensible dedans, mais ça révèle les destinations et le rythme de recherche.
+**Dépôt public :** ce projet est fait pour être partagé — chacun clone le dépôt et fait tourner sa propre instance avec ses propres secrets (jamais les tiens : `.env` est exclu par `.gitignore` et les secrets GitHub Actions ne sont jamais exposés dans les logs). Par contre `data/scanner.db` sera visible publiquement dans le dépôt une fois committé — pas de donnée sensible dedans, mais ça révèle les destinations et le rythme de recherche.
 
 ---
 
@@ -82,6 +84,6 @@ Pour réduire le coût : retire des destinations de `config.yaml`, ou espace le 
 ## Prochaines étapes
 
 - **v1.1** : résumé quotidien même sans alerte
-- **v1.2** : graphique d'évolution des prix depuis `history.csv`
+- **v1.2** : graphique d'évolution des prix depuis `data/scanner.db`
 - **v2** : interface web (React) + comptes utilisateurs → première version vendable
 - **v3** : Stripe + plan gratuit/payant → produit freemium

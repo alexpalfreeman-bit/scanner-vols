@@ -6,12 +6,15 @@ liste mondiale :
   1. Choisit une date de depart candidate par rotation (~3 a ~6 mois a l'avance)
   2. Cree un "offer request" Duffel pour un sejour de N nuits
   3. Retient l'offre la moins chere
-  4. Enregistre le prix dans data/history.csv (historique)
-  5. Envoie une alerte Telegram si :
+  4. Enregistre le prix dans data/scanner.db (historique)
+  5. Envoie une alerte Telegram (jusqu'a 3 messages independants, chacun avec
+     sa propre deduplication/cooldown de 72h) si :
        - le prix passe sous le seuil fixe "prix_max" (optionnel) de la destination, OU
        - le prix est un nouveau minimum historique pour cette destination, OU
-       - le prix est nettement sous la mediane historique de la destination
-         (bonne affaire, ou possible erreur de prix si l'ecart est tres grand)
+       - le prix est un outlier bas (z-score robuste) par rapport a un
+         echantillon comparable (meme route/mois/horizon de reservation) :
+         bonne affaire, ou erreur de prix probable si en plus corrobore par
+         re-requete (option detection.corroboration_activee, config.yaml)
 
 Usage local :  python scanner.py
 Automatisation : voir .github/workflows/scan.yml
@@ -19,64 +22,55 @@ Automatisation : voir .github/workflows/scan.yml
 Note Duffel : le token commence par "duffel_test_" (bac a sable, prix NON reels)
 ou "duffel_live_" (vrais prix). On choisit via la variable DUFFEL_ACCESS_TOKEN.
 
-Note technique : on appelle l'API Duffel directement en HTTP (pas via le
-package PyPI "duffel-api", qui n'a pas ete mis a jour pour l'API v2 de Duffel
-et fait planter silencieusement le parsing des offres).
+Ce module est l'orchestrateur : il enchaine config -> providers -> storage ->
+detection -> alerting (voir CLAUDE.md pour le decoupage en modules).
 """
 
-import csv
+import io
+import logging
 import os
 import statistics
 import sys
 import time
-from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, date, datetime, timedelta
 
-import requests
-import yaml
-from dotenv import load_dotenv
-
-load_dotenv()
+from alerting import envoyer_alerte, envoyer_digest
+from config import Env, ErreurConfiguration, charger_config, charger_env, valider_config
+from detection import (
+    SignauxCorroboration,
+    TypeAlerte,
+    classifier,
+    corroborer_erreur_prix,
+    dates_voisines_a_sonder,
+    echantillon_comparable,
+    est_nouveau_minimum,
+    raison_prix_max,
+    statistiques_destination,
+)
+from providers.base import FournisseurVols, Offre
+from providers.duffel import FournisseurDuffel
+from storage import (
+    enregistrer_observation,
+    horizon_jours,
+    lire_historique,
+    lire_observations,
+    obtenir_derniere_alerte,
+)
 
 # Force stdout/stderr en UTF-8 : sur Windows, la console utilise par defaut
-# un codepage (ex. cp1252) qui plante sur les caracteres comme "->".
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+# un codepage (ex. cp1252) qui plante sur les caracteres comme "->". Le
+# isinstance() garde le typage correct (TextIO n'a pas reconfigure()) et
+# protege le cas rare ou stdout/stderr aurait deja ete remplace ailleurs.
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if isinstance(sys.stderr, io.TextIOWrapper):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-DUFFEL_API_URL = "https://api.duffel.com"
-DUFFEL_VERSION = "v2"
-
-BASE_DIR = Path(__file__).parent
-CONFIG_FILE = BASE_DIR / "config.yaml"
-HISTORY_FILE = BASE_DIR / "data" / "history.csv"
-
-COLONNES = [
-    "horodatage_utc", "origine", "destination",
-    "date_depart", "date_retour", "prix", "devise",
-    "compagnie", "escales",
-]
-
-
-# ---------------------------------------------------------------- config
-
-def charger_config() -> dict:
-    with open(CONFIG_FILE, encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def creer_session_duffel() -> requests.Session:
-    token = os.environ["DUFFEL_ACCESS_TOKEN"]
-    session = requests.Session()
-    session.headers.update({
-        "Authorization": f"Bearer {token}",
-        "Duffel-Version": DUFFEL_VERSION,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    })
-    return session
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------- candidats
+
 
 def choisir_offset_semaines(code: str, offsets: list[int], jour: date) -> int:
     """Choisit un decalage (en semaines) dans `offsets`, de facon deterministe
@@ -102,239 +96,370 @@ def generer_candidats(config: dict) -> list[dict]:
         decalage = choisir_offset_semaines(code, offsets, aujourdhui)
         depart = aujourdhui + timedelta(weeks=decalage)
         retour = depart + timedelta(days=duree_nuits)
-        candidats.append({
-            "origine": origine,
-            "destination": code,
-            "date_depart": depart.isoformat(),
-            "date_retour": retour.isoformat(),
-            "prix_max": dest.get("prix_max"),
-            "direct_seulement": dest.get("direct_seulement", False),
-        })
+        candidats.append(
+            {
+                "origine": origine,
+                "destination": code,
+                "date_depart": depart.isoformat(),
+                "date_retour": retour.isoformat(),
+                "prix_max": dest.get("prix_max"),
+                "direct_seulement": dest.get("direct_seulement", False),
+            }
+        )
     return candidats
 
 
-# ---------------------------------------------------------------- recherche
+# ---------------------------------------------------------------- corroboration (Session B)
 
-def chercher_meilleur_vol(session: requests.Session, route: dict, config: dict) -> dict | None:
-    """Retourne l'offre la moins chere pour la route, ou None si rien trouve."""
-    # Une "slice" = un trajet (aller). Un aller-retour = deux slices.
-    slices = [{
-        "origin": route["origine"],
-        "destination": route["destination"],
-        "departure_date": str(route["date_depart"]),
-    }]
+
+def _route_avec_date_depart(route: dict, nouvelle_date_depart: str) -> dict:
+    """Route candidate translatee a une nouvelle date de depart (sondes de
+    corroboration, AUDIT.md 2.3c) : conserve la duree du sejour en
+    translatant date_retour du meme delta si present - ne fabrique jamais un
+    retour sur un aller simple."""
+    nouvelle_route = dict(route)
+    nouvelle_route["date_depart"] = nouvelle_date_depart
     if route.get("date_retour"):
-        slices.append({
-            "origin": route["destination"],
-            "destination": route["origine"],
-            "departure_date": str(route["date_retour"]),
-        })
+        delta = date.fromisoformat(nouvelle_date_depart) - date.fromisoformat(route["date_depart"])
+        nouvelle_route["date_retour"] = (
+            date.fromisoformat(route["date_retour"]) + delta
+        ).isoformat()
+    return nouvelle_route
 
-    passengers = [{"type": "adult"} for _ in range(config.get("adultes", 1))]
 
-    body = {
-        "data": {
-            "cabin_class": config.get("classe", "economy"),
-            "passengers": passengers,
-            "slices": slices,
-            "max_connections": 0 if route.get("direct_seulement") else 1,
-        }
-    }
-    r = session.post(
-        f"{DUFFEL_API_URL}/air/offer_requests",
-        params={"return_offers": "true"},
-        json=body,
-        timeout=30,
-    )
-    if not r.ok:
-        erreur = (r.json().get("errors") or [{}])[0]
-        raise RuntimeError(f"{erreur.get('type')}: {erreur.get('title')}: {erreur.get('message')}")
-
-    offres = r.json()["data"].get("offers") or []
-    if not offres:
+def _prix_si_valide(offre: Offre | None, devise_attendue: str) -> int | None:
+    """None si la sonde n'a renvoye aucune offre, ou si sa devise differe de
+    celle de l'offre candidate (jamais de comparaison cross-devise dans la
+    corroboration - meme garde que raison_prix_max/statistiques_destination)."""
+    if offre is None or offre.devise != devise_attendue:
         return None
-
-    meilleure = min(offres, key=lambda o: float(o["total_amount"]))
-
-    # Nombre d'escales = segments - 1, additionne sur toutes les slices (max par slice)
-    escales = 0
-    for sl in meilleure["slices"]:
-        escales = max(escales, len(sl["segments"]) - 1)
-    # Nom complet de la compagnie operante du premier segment (exige par la reglementation US)
-    premier_segment = meilleure["slices"][0]["segments"][0]
-    compagnie = (premier_segment.get("operating_carrier") or {}).get("name") \
-        or (premier_segment.get("marketing_carrier") or {}).get("name", "?")
-
-    return {
-        "prix": round(float(meilleure["total_amount"]), 2),
-        "devise": meilleure["total_currency"],
-        "compagnie": compagnie,
-        "escales": escales,
-    }
+    return offre.prix_cents
 
 
-# ---------------------------------------------------------------- historique
+def sonder_corroboration(
+    fournisseur: FournisseurVols, route: dict, devise: str, budget_restant: int
+) -> tuple[SignauxCorroboration, int]:
+    """Sonde les signaux 1 (re-requete immediate) et 2 (dates voisines +/- 3
+    jours) de la corroboration erreur_prix (AUDIT.md 2.3c ; signaux 3/4 non
+    cables cette session, cf. Journal Session A). Chaque sonde reseau est
+    individuellement tolerante aux pannes (comme verifier_canari) : une
+    exception ou une devise inattendue redescend simplement le signal a
+    absent, jamais un crash du run. Le budget est decompte que la sonde
+    reussisse ou non ; s'il est deja epuise en entree, aucun appel reseau
+    n'est tente - purement mecanique, sans log (l'appelant, scanner.py::main,
+    est seul a savoir si c'est une premiere transition a journaliser).
+    Retourne les signaux mesures (partiels si le budget est insuffisant pour
+    tout sonder) et le budget restant."""
+    if budget_restant <= 0:
+        return SignauxCorroboration(), budget_restant
 
-def lire_historique() -> list[dict]:
-    if not HISTORY_FILE.exists():
-        return []
-    with open(HISTORY_FILE, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
-
-def statistiques_destination(historique: list[dict], origine: str, destination: str, config: dict) -> dict | None:
-    """Statistiques de la destination (toutes dates confondues, puisque la
-    date candidate change a chaque run) : minimum, mediane, et tendance
-    recente vs ancienne. Retourne None sans aucune observation prealable."""
-    lignes = sorted(
-        (l for l in historique if l["origine"] == origine and l["destination"] == destination),
-        key=lambda l: l["horodatage_utc"],
-    )
-    prix = [float(l["prix"]) for l in lignes]
-    if not prix:
-        return None
-
-    cfg = config.get("detection", {})
-    fenetre = cfg.get("fenetre_tendance", 5)
-    seuil_variation = cfg.get("variation_tendance_pct", 0.05)
-
-    recents = prix[-fenetre:]
-    anciens = prix[-(fenetre * 2):-fenetre]
-
-    tendance, variation = None, None
-    if len(recents) >= 2 and len(anciens) >= 2:
-        moy_recent, moy_ancien = statistics.mean(recents), statistics.mean(anciens)
-        variation = (moy_recent - moy_ancien) / moy_ancien
-        if variation >= seuil_variation:
-            tendance = "hausse"
-        elif variation <= -seuil_variation:
-            tendance = "baisse"
-        else:
-            tendance = "stable"
-
-    return {
-        "n": len(prix),
-        "min": min(prix),
-        "mediane": statistics.median(prix),
-        "tendance": tendance,
-        "variation_pct": variation,
-    }
-
-
-def ajouter_historique(ligne: dict) -> None:
-    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    nouveau_fichier = not HISTORY_FILE.exists()
-    with open(HISTORY_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=COLONNES)
-        if nouveau_fichier:
-            writer.writeheader()
-        writer.writerow(ligne)
-
-
-# ---------------------------------------------------------------- alertes
-
-def envoyer_telegram(message: str) -> None:
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    r = requests.post(
-        url,
-        data={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
-        timeout=15,
-    )
-    r.raise_for_status()
-
-
-def formater_alerte(route: dict, vol: dict, raisons: list[str], stats: dict | None) -> str:
-    escales = "direct" if vol["escales"] == 0 else f"{vol['escales']} escale(s)"
-    retour = f" → retour {route['date_retour']}" if route.get("date_retour") else " (aller simple)"
-
-    if stats and stats["tendance"]:
-        emoji = {"hausse": "📈", "baisse": "📉", "stable": "➡️"}[stats["tendance"]]
-        ligne_tendance = (
-            f"{emoji} Tendance {stats['tendance']} ({stats['variation_pct']:+.0%}) — "
-            f"médiane {stats['mediane']:.0f} {vol['devise']} sur {stats['n']} observation(s)"
+    budget_restant -= 1
+    try:
+        offre = fournisseur.meilleure_offre(route)
+        prix_immediat_cents = _prix_si_valide(offre, devise)
+    except Exception as e:
+        logger.warning(
+            "corroboration %s : signal 1 (re-requête) en échec (%s)", route["destination"], e
         )
-    elif stats:
-        ligne_tendance = f"ℹ️ {stats['n']} observation(s) — pas encore assez pour une tendance"
-    else:
-        ligne_tendance = "ℹ️ Première observation pour cette destination"
+        prix_immediat_cents = None
+    time.sleep(0.25)
+
+    prix_voisines_cents: list[int] = []
+    if budget_restant > 0:
+        avant, apres = dates_voisines_a_sonder(route["date_depart"])
+        for date_voisine in (avant, apres):
+            if budget_restant <= 0:
+                break
+            budget_restant -= 1
+            try:
+                offre = fournisseur.meilleure_offre(_route_avec_date_depart(route, date_voisine))
+                prix = _prix_si_valide(offre, devise)
+                if prix is not None:
+                    prix_voisines_cents.append(prix)
+            except Exception as e:
+                logger.warning(
+                    "corroboration %s : signal 2 (date voisine %s) en échec (%s)",
+                    route["destination"],
+                    date_voisine,
+                    e,
+                )
+            time.sleep(0.25)
 
     return (
-        f"✈️ <b>ALERTE PRIX — {route['origine']} → {route['destination']}</b>\n"
-        f"📅 Départ {route['date_depart']}{retour}\n"
-        f"💰 <b>{vol['prix']} {vol['devise']}</b> ({vol['compagnie']}, {escales})\n"
-        f"🎯 {' + '.join(raisons)}\n"
-        f"{ligne_tendance}"
+        SignauxCorroboration(
+            prix_requete_immediate_cents=prix_immediat_cents,
+            prix_dates_voisines_cents=tuple(prix_voisines_cents),
+        ),
+        budget_restant,
     )
+
+
+def _tenter_alerte(
+    *,
+    route: dict,
+    vol: dict,
+    stats: dict | None,
+    route_id: int,
+    type_alerte: TypeAlerte,
+    raisons: list[str],
+    prix_cents: int,
+    maintenant: datetime,
+    env: Env,
+) -> tuple[bool, str | None]:
+    """Recupere l'alerte precedente (dedup/cooldown) et tente l'envoi via
+    alerting.envoyer_alerte ; convertit toute exception (Telegram, reseau) en
+    message d'erreur plutot que de crasher le run - chacun des 3 types
+    d'alerte independants (seuil/minimum/aubaine-ou-erreur_prix, AUDIT.md,
+    Journal Session A) garde son autonomie vis-a-vis des 2 autres. Retourne
+    (envoyee, erreur)."""
+    alerte_precedente = obtenir_derniere_alerte(route_id, route["date_depart"], type_alerte)
+    try:
+        envoyee = envoyer_alerte(
+            route=route,
+            vol=vol,
+            raisons=raisons,
+            stats=stats,
+            route_id=route_id,
+            type_alerte=type_alerte,
+            prix_cents=prix_cents,
+            alerte_precedente=alerte_precedente,
+            maintenant=maintenant,
+            env=env,
+        )
+        return envoyee, None
+    except Exception as e:
+        logger.error("%s : erreur Telegram (%s) : %s", route["destination"], type_alerte, e)
+        return False, str(e)
 
 
 # ---------------------------------------------------------------- main
 
-def main() -> int:
-    config = charger_config()
-    session = creer_session_duffel()
-    historique = lire_historique()
-    detection_cfg = config.get("detection", {})
-    maintenant = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
 
-    erreurs = 0
+def ecrire_resume_github(resultats: list[tuple[str, str]]) -> None:
+    """Ajoute un resume Markdown a $GITHUB_STEP_SUMMARY si present (no-op en local)."""
+    chemin = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not chemin:
+        return
+    lignes = ["## Résumé du scan", "", "| Route | Résultat |", "|---|---|"]
+    lignes += [f"| {route} | {resultat} |" for route, resultat in resultats]
+    try:
+        with open(chemin, "a", encoding="utf-8") as f:
+            f.write("\n".join(lignes) + "\n")
+    except OSError:
+        pass
+
+
+def horodatage_maintenant() -> str:
+    """ISO 8601 UTC a la seconde, un appel par observation (pas une seule
+    fois par run) : deux prix trouves a des instants differents ne doivent
+    jamais partager le meme horodatage."""
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    try:
+        env = charger_env()
+        config = valider_config(charger_config())
+    except ErreurConfiguration as e:
+        logger.error("Configuration invalide : %s", e)
+        return 1
+
+    fournisseur = FournisseurDuffel(env, config)
+    fournisseur.verifier_canari()
+    historique = lire_historique()
+    observations_brutes = lire_observations()
+    detection_cfg = config.get("detection", {})
+    budget_corroboration = detection_cfg.get("corroboration_max_requetes_par_run", 15)
+    budget_corroboration_epuise = False
+
+    resultats: list[tuple[str, str]] = []
     for route in generer_candidats(config):
         nom_route = f"{route['origine']}→{route['destination']} ({route['date_depart']})"
         try:
-            vol = chercher_meilleur_vol(session, route, config)
+            offre = fournisseur.meilleure_offre(route)
         except Exception as e:
-            print(f"[ERREUR API] {nom_route} : {e}", file=sys.stderr)
-            erreurs += 1
+            logger.error("%s : erreur API : %s", nom_route, e)
+            resultats.append((nom_route, f"ERREUR API : {e}"))
             continue
         finally:
             time.sleep(0.25)
 
-        if vol is None:
-            print(f"[AUCUN VOL] {nom_route}")
+        if offre is None:
+            logger.warning("%s : aucun vol trouvé", nom_route)
+            resultats.append((nom_route, "aucun vol trouvé"))
             continue
 
-        stats = statistiques_destination(historique, route["origine"], route["destination"], config)
+        stats = statistiques_destination(
+            historique, route["origine"], route["destination"], offre.devise, config
+        )
 
-        ajouter_historique({
-            "horodatage_utc": maintenant,
-            "origine": route["origine"],
-            "destination": route["destination"],
-            "date_depart": route["date_depart"],
-            "date_retour": route.get("date_retour", ""),
-            "prix": vol["prix"],
-            "devise": vol["devise"],
-            "compagnie": vol["compagnie"],
-            "escales": vol["escales"],
-        })
+        horodatage = horodatage_maintenant()
+        route_id = enregistrer_observation(
+            origine=route["origine"],
+            destination=route["destination"],
+            observe_le=horodatage,
+            date_depart=route["date_depart"],
+            date_retour=route.get("date_retour") or None,
+            prix_cents=offre.prix_cents,
+            devise=offre.devise,
+            compagnie=offre.compagnie,
+            escales=offre.escales,
+        )
 
-        raisons = []
-        if route.get("prix_max") is not None and vol["prix"] <= route["prix_max"]:
-            raisons.append(f"sous ton seuil fixe de {route['prix_max']} {vol['devise']}")
-        if stats and vol["prix"] < stats["min"]:
-            raisons.append(f"nouveau minimum historique (précédent {stats['min']} {vol['devise']})")
-        if stats and stats["n"] >= detection_cfg.get("echantillon_min", 5):
-            seuil_bonne_affaire = detection_cfg.get("seuil_bonne_affaire_pct", 0.15)
-            plafond = stats["mediane"] * (1 - seuil_bonne_affaire)
-            if vol["prix"] <= plafond:
-                baisse_pct = 1 - vol["prix"] / stats["mediane"]
-                seuil_erreur = detection_cfg.get("seuil_erreur_prix_pct", 0.40)
-                label = "possible erreur de prix" if baisse_pct >= seuil_erreur else "bonne affaire"
-                raisons.append(f"{label} : {baisse_pct:.0%} sous la médiane ({stats['mediane']:.0f} {vol['devise']})")
+        maintenant = datetime.fromisoformat(horodatage)
+        horizon = horizon_jours(horodatage, route["date_depart"])
+        echantillon = echantillon_comparable(
+            observations_brutes,
+            route_id=route_id,
+            devise=offre.devise,
+            date_depart_candidat=route["date_depart"],
+            horizon_jours_candidat=horizon,
+            maintenant=maintenant,
+        )
+        classification = classifier(offre.prix_cents, echantillon.prix_cents)
+        logger.info(
+            "%s : classification z-score = %s (niveau=%s, n=%s)",
+            nom_route,
+            classification,
+            echantillon.niveau,
+            echantillon.n,
+        )
 
-        if raisons:
-            message = formater_alerte(route, vol, raisons, stats)
-            try:
-                envoyer_telegram(message)
-                print(f"[ALERTE ENVOYÉE] {nom_route} : {vol['prix']} {vol['devise']}")
-            except Exception as e:
-                print(f"[ERREUR TELEGRAM] {nom_route} : {e}", file=sys.stderr)
-                erreurs += 1
+        prix_dollars = offre.prix_cents / 100
+        vol = {
+            "prix": prix_dollars,
+            "devise": offre.devise,
+            "compagnie": offre.compagnie,
+            "escales": offre.escales,
+        }
+        if route.get("prix_max") is not None and offre.devise != config["devise"]:
+            logger.warning(
+                "%s : prix_max ignoré (configuré en %s, offre en %s)",
+                nom_route,
+                config["devise"],
+                offre.devise,
+            )
+
+        types_envoyes: list[str] = []
+        erreurs_alerte: list[str] = []
+
+        # --- type 'seuil' : prix sous le seuil fixe de la destination (Phase 1, conserve)
+        raison_seuil = raison_prix_max(
+            prix_dollars, offre.devise, route.get("prix_max"), config["devise"]
+        )
+        if raison_seuil:
+            envoyee, erreur = _tenter_alerte(
+                route=route,
+                vol=vol,
+                stats=stats,
+                route_id=route_id,
+                type_alerte="seuil",
+                raisons=[raison_seuil],
+                prix_cents=offre.prix_cents,
+                maintenant=maintenant,
+                env=env,
+            )
+            if erreur:
+                erreurs_alerte.append(f"seuil: {erreur}")
+            elif envoyee:
+                types_envoyes.append("seuil")
+
+        # --- type 'minimum' : nouveau minimum historique de la destination (Phase 1, conserve)
+        echantillon_min = detection_cfg.get("echantillon_min", 5)
+        marge_minimum_pct = detection_cfg.get("marge_minimum_pct", 0.03)
+        if stats and est_nouveau_minimum(prix_dollars, stats, echantillon_min, marge_minimum_pct):
+            raison_minimum = f"nouveau minimum historique (précédent {stats['min']} {offre.devise})"
+            envoyee, erreur = _tenter_alerte(
+                route=route,
+                vol=vol,
+                stats=stats,
+                route_id=route_id,
+                type_alerte="minimum",
+                raisons=[raison_minimum],
+                prix_cents=offre.prix_cents,
+                maintenant=maintenant,
+                env=env,
+            )
+            if erreur:
+                erreurs_alerte.append(f"minimum: {erreur}")
+            elif envoyee:
+                types_envoyes.append("minimum")
+
+        # --- type 'aubaine' / 'erreur_prix' : outlier bas via z-score (AUDIT.md 2.3, cablage Session B)
+        if classification in ("bonne_affaire", "candidat_erreur_prix"):
+            type_alerte: TypeAlerte = "aubaine"
+            if classification == "candidat_erreur_prix" and detection_cfg.get(
+                "corroboration_activee", False
+            ):
+                signaux, budget_corroboration = sonder_corroboration(
+                    fournisseur, route, offre.devise, budget_corroboration
+                )
+                if budget_corroboration <= 0 and not budget_corroboration_epuise:
+                    logger.warning(
+                        "corroboration : plafond de re-requêtes atteint pour ce run (%d) "
+                        "- corroboration dégradée pour le reste du run",
+                        detection_cfg.get("corroboration_max_requetes_par_run", 15),
+                    )
+                budget_corroboration_epuise = (
+                    budget_corroboration_epuise or budget_corroboration <= 0
+                )
+                verdict = corroborer_erreur_prix(
+                    offre.prix_cents, echantillon.prix_cents, signaux
+                ).verdict
+                if verdict == "erreur_prix":
+                    type_alerte = "erreur_prix"
+            label = "possible erreur de prix" if type_alerte == "erreur_prix" else "bonne affaire"
+            mediane_echantillon_cents = statistics.median(echantillon.prix_cents)
+            baisse_pct = 1 - offre.prix_cents / mediane_echantillon_cents
+            raison_zscore = (
+                f"{label} : {baisse_pct:.0%} sous la médiane comparable "
+                f"({mediane_echantillon_cents / 100:.0f} {offre.devise}, "
+                f"{echantillon.n} obs., niveau {echantillon.niveau})"
+            )
+            envoyee, erreur = _tenter_alerte(
+                route=route,
+                vol=vol,
+                stats=stats,
+                route_id=route_id,
+                type_alerte=type_alerte,
+                raisons=[raison_zscore],
+                prix_cents=offre.prix_cents,
+                maintenant=maintenant,
+                env=env,
+            )
+            if erreur:
+                erreurs_alerte.append(f"{type_alerte}: {erreur}")
+            elif envoyee:
+                types_envoyes.append(type_alerte)
+
+        if erreurs_alerte:
+            resultats.append((nom_route, f"ERREUR TELEGRAM : {'; '.join(erreurs_alerte)}"))
+        elif types_envoyes:
+            resultats.append(
+                (
+                    nom_route,
+                    f"alerte envoyée ({', '.join(types_envoyes)}) : {prix_dollars} {offre.devise}",
+                )
+            )
         else:
             mediane = f"{stats['mediane']:.0f}" if stats else "?"
-            print(f"[OK] {nom_route} : {vol['prix']} {vol['devise']} (médiane : {mediane})")
+            resultats.append((nom_route, f"ok : {prix_dollars} {offre.devise}, médiane {mediane}"))
 
-    return 1 if erreurs else 0
+    resume_duffel = fournisseur.resume()
+    ecrire_resume_github(resultats)
+    try:
+        envoyer_digest(
+            resultats,
+            [resume_duffel],
+            env,
+            budget_corroboration_epuise=budget_corroboration_epuise,
+        )
+    except Exception as e:
+        logger.error("erreur lors de l'envoi du digest technique : %s", e)
+    total = len(resultats)
+    echecs = sum(1 for _, r in resultats if r.startswith("ERREUR"))
+    return 1 if total and echecs == total else 0
 
 
 if __name__ == "__main__":
