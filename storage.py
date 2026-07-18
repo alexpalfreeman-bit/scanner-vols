@@ -27,9 +27,6 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent
 DB_FILE = BASE_DIR / "data" / "scanner.db"
 
-# Conserve uniquement pour migrer_csv.py (migration ponctuelle, voir AUDIT.md 2.2).
-HISTORY_FILE = BASE_DIR / "data" / "history.csv"
-
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS routes (
   id          INTEGER PRIMARY KEY,
@@ -130,7 +127,7 @@ def inserer_observation(
     environnement: str,
 ) -> None:
     """N'effectue pas le commit : a la charge de l'appelant (permet d'inserer
-    plusieurs observations dans une seule transaction, ex. migrer_csv.py).
+    plusieurs observations dans une seule transaction).
 
     environnement (pas de defaut : parametre obligatoire, comme prix_cents)
     doit venir de providers.duffel.environnement_duffel - jamais devine ni
