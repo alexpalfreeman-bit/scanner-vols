@@ -334,6 +334,25 @@ class FournisseurVols(Protocol):
   confidentialité, registre des données, CGU (mention explicite : les error
   fares peuvent être annulées par les compagnies).
 - Monétisation immédiate : liens d'affiliation (Travelpayouts/Kiwi) dans les alertes.
+- Cooldown partagé (ou au moins concerté) entre les types d'alerte `aubaine`
+  et `erreur_prix` pour une même (route, date_depart) : aujourd'hui deux
+  cooldowns totalement indépendants (clé `(route_id, date_depart, type)`)
+  permettent qu'une route bascule d'un type à l'autre entre deux runs
+  rapprochés si la corroboration réussit/échoue différemment d'une fois à
+  l'autre, produisant potentiellement 2 messages proches pour le même vol.
+  Accepté tel quel au go-live (Session B) — conséquence émergente de
+  décisions déjà actées en Session A (3 messages indépendants, pas de
+  fusion), à traiter avant un lancement public si le bruit s'avère réel.
+- Sondes de corroboration comptabilisées séparément du circuit breaker et
+  des statistiques `resume()`/digest par fournisseur : aujourd'hui elles
+  passent par `FournisseurDuffel.meilleure_offre()` comme les appels
+  primaires, donc une sonde en échec compte vers la suspension à 5 échecs
+  consécutifs et une sonde réussie peut masquer une dégradation réelle en
+  cours ; elles peuvent aussi faire basculer à tort le taux de réponses
+  "0 offre" du digest. Nécessiterait une méthode de sonde dédiée dans le
+  contrat `FournisseurVols` (Phase 2.4, gelée cette session). Accepté tel
+  quel au go-live (Session B), budget de corroboration gardé conservateur
+  en partie pour cette raison.
 
 ---
 
@@ -919,5 +938,195 @@ appliquer alors) :
   `venv/Scripts/pytest.exe` de ce dépôt résout vers l'interpréteur Python
   système au lieu de celui du venv (reproduit identiquement en PowerShell
   et en bash, sur des fichiers de test non touchés cette session) —
+  contourné via `python -m pytest`, qui utilise le bon interpréteur ;
+  `ruff`/`mypy` ne sont pas affectés.
+
+### Câblage go-live — Session B (2026-07-18)
+
+Périmètre donné explicitement par l'utilisateur : terminer le câblage —
+`classifier()` → `envoyer_alerte` (bonne_affaire/candidat_erreur_prix →
+aubaine/erreur_prix), corroboration derrière un flag avec plafond de
+re-requêtes, `prix_max`/`est_nouveau_minimum` câblés eux aussi via
+`envoyer_alerte` (types `seuil`/`minimum`), persistance dans `alertes`
+uniquement après envoi Telegram confirmé réussi, `envoyer_digest` en fin de
+run, retrait du code mort. Plan pressure-testé via un agent Plan dédié avant
+implémentation (même pratique que 2.3/2.4/2.5/Session A) ; 2 vérifications
+préalables explicitement demandées par l'utilisateur, faites avant tout code :
+1. **`envoyer_telegram` lève toujours sur échec** (jamais de retour
+   booléen/`None`) : reconfirmé en relisant le corps exact — un seul
+   `return` (implicite `None`), atteint uniquement sur succès réel ; tout
+   échec (retries épuisés, HTTP non-transitoire via `raise_for_status()`
+   dans le `else` du `try` — jamais capturé par le `except
+   requests.RequestException` qui gère les retries — ou exception réseau
+   répétée) se termine par un `raise`. Condition nécessaire à la persistance
+   conditionnelle sans try/except explicite (voir plus bas).
+2. **Politique `extra=` de pydantic** sur un `config.yaml` qui garderait
+   `seuil_bonne_affaire_pct`/`seuil_erreur_prix_pct` après leur retrait du
+   modèle : vérifié empiriquement (pas juste par mémoire de pydantic) avec
+   la version exacte épinglée (2.13.4, via le venv) sur un modèle jetable
+   reproduisant `Detection` post-retrait — aucun `model_config`/`ConfigDict`
+   n'est défini nulle part dans `config.py`, la politique par défaut
+   (`extra="ignore"`) s'applique donc : clés inconnues silencieusement
+   ignorées, aucune exception.
+
+- **`detection.py`** (fichier par ailleurs gelé) : seul changement,
+  `TypeAlerte` gagne `"seuil"` (`Literal["aubaine", "erreur_prix",
+  "minimum", "seuil"]`). Vérifié non-comportemental avant de le faire :
+  `type_alerte` n'est jamais inspecté par valeur dans `doit_alerter` (sert
+  uniquement à documenter la clé, comme le dit son propre docstring) ni
+  dans `envoyer_alerte` (juste forwarding + `%s` de logging) — pur ajout de
+  vocabulaire, seule option qui reste type-safe sans élargir la signature
+  de `doit_alerter` ni introduire de `# type: ignore` (`warn_unused_ignores`
+  actif dans `pyproject.toml`).
+- **`config.py`/`config.yaml`** : ajout de `corroboration_activee: bool =
+  False` (déjà acté en Session A) et `corroboration_max_requetes_par_run:
+  int = Field(gt=0, default=15)` — plafond conservateur assumé, pas acté
+  avec l'utilisateur (même statut que `seuil_chute_pct` en Phase 2.3 ou
+  `SEUIL_TAUX_ZERO_OFFRES` en Phase 2.4) : calcul de charge, 38 appels
+  primaires/run (37 destinations + canari), une corroboration complète
+  coûte jusqu'à 3 requêtes, et `seuil_erreur_z=-3.5` est conçu pour être
+  rare — ce plafond ne devrait quasiment jamais s'activer en régime normal,
+  c'est un garde-fou anti-run-pathologique. Retrait de
+  `seuil_bonne_affaire_pct`/`seuil_erreur_prix_pct` (Phase 1, devenus morts
+  une fois le bloc médiane-pct de `scanner.py` supprimé) groupé avec le
+  commit `scanner.py` plutôt qu'isolé : un commit qui retirerait ces clés
+  seul resterait vert uniquement par coïncidence numérique (le `.get(clé,
+  défaut)` de `scanner.py` retombe sur des défauts qui coïncident avec les
+  anciennes valeurs de `config.yaml`), pas une garantie générale — un des
+  findings du pressure-test. `tests/test_config.py` : le test de bornes
+  hors-limites migré vers `marge_minimum_pct` (même bornes `gt=0, lt=1`).
+- **`alerting.py`** : `envoyer_alerte` gagne l'appel à
+  `storage.enregistrer_alerte(...)` juste après `envoyer_telegram(...)`,
+  sans try/except entre les deux — si `envoyer_telegram` lève (garanti par
+  la vérification 1 ci-dessus), `enregistrer_alerte` n'est jamais atteint,
+  aucune logique explicite de gestion d'erreur nécessaire pour garantir
+  "persistance seulement si envoi confirmé". Le docstring du module
+  `storage.py` (Session A) documentait déjà cette intention ("côté
+  alerting.envoyer_alerte") ; tension réelle avec le docstring de
+  `scanner.py` ("l'orchestrateur" qui parle à tous les modules) notée et
+  tranchée en faveur du premier (le pressure-test confirme : "un envoi
+  confirmé doit compter pour le cooldown" fait partie du contrat de
+  `envoyer_alerte`, pas une tâche annexe que chaque appelant doit se
+  souvenir de faire). `digest_necessaire`/`formater_digest`/`envoyer_digest`
+  gagnent un paramètre keyword-only `budget_corroboration_epuise: bool =
+  False` (ajustement utilisateur : atteindre le plafond de corroboration
+  est une anomalie en soi, pas seulement un détail de coût) — force le
+  digest même sans route en erreur ni fournisseur anormal, ajoute une ligne
+  `⚠️ Budget de corroboration épuisé...` au message.
+- **`scanner.py`** — câblage principal :
+  - Helper `_tenter_alerte()` : récupère `alerte_precedente` via
+    `obtenir_derniere_alerte`, appelle `envoyer_alerte`, catch `Exception`
+    (log ERROR, jamais de crash du run) — factorise les 3 sites d'appel
+    (seuil/minimum/aubaine-ou-erreur_prix), chacun indépendant vis-à-vis
+    des 2 autres (décision Session A : jusqu'à 3 messages Telegram
+    distincts par route, pas de fusion).
+  - Bloc Phase 1 médiane-pct (`seuil_bonne_affaire_pct`/
+    `seuil_erreur_prix_pct`) supprimé, remplacé par le branchement
+    `classifier()` → type `aubaine`/`erreur_prix` ; le texte de la raison
+    est reconstruit depuis `echantillon` (médiane/n/niveau de l'échantillon
+    comparable), pas depuis `stats` (médiane toutes-dates-confondues,
+    Phase 1, conservée uniquement pour la ligne de tendance du message et
+    `est_nouveau_minimum`).
+  - Corroboration : `sonder_corroboration(fournisseur, route, devise,
+    budget_restant)` sonde les signaux 1 (re-requête) et 2 (dates voisines
+    ±3j, via `dates_voisines_a_sonder` + nouveau helper
+    `_route_avec_date_depart` qui translate `date_depart`/`date_retour` du
+    même delta, sans jamais fabriquer un retour sur un aller simple) ;
+    budget partagé au niveau du run (pas par route), décompté que la sonde
+    réussisse ou échoue, chaque sonde individuellement tolérante aux pannes
+    (comme `verifier_canari`). **Garde-fou trouvé pendant le pressure-test,
+    absent du plan initial** : `_prix_si_valide()` exclut une sonde qui
+    renvoie 0 offre (`None`) OU une devise différente de l'offre candidate
+    — sans lui, une comparaison cross-devise silencieuse était possible
+    dans `corroborer_erreur_prix`, et un `offre.prix_cents` sur `offre=None`
+    aurait levé `AttributeError`, avalé par erreur par le même
+    `except Exception` prévu pour les vraies pannes réseau. Verdict
+    `erreur_prix` seulement si `corroboration_activee` ET corroboration
+    confirmée (`corroborer_erreur_prix(...).verdict == "erreur_prix"`) ;
+    sinon (flag désactivé, budget insuffisant, ou verdict non confirmé)
+    downgrade systématique en `aubaine`, jamais d'alerte `erreur_prix` sans
+    corroboration réussie (décision Session A). Budget épuisé (ajustement
+    utilisateur) : détecté par transition (`budget_corroboration <= 0` et
+    pas encore signalé) → un seul `logger.warning(...)` pour tout le run
+    (pas un par candidat skippé) + `budget_corroboration_epuise=True`
+    transmis à `envoyer_digest` en fin de run.
+  - `fournisseur.resume()` : valeur enfin capturée (`resume_duffel`, jetée
+    jusqu'ici) et passée à `envoyer_digest(resultats, [resume_duffel], env,
+    budget_corroboration_epuise=...)`, dans un `try/except` qui n'affecte
+    jamais le code de sortie.
+- **Incident réel pendant l'implémentation (pas dans le plan)** : juste
+  après avoir câblé `enregistrer_alerte` dans `alerting.envoyer_alerte`,
+  `pytest -q tests/test_alerting.py` passait au vert mais **écrivait pour
+  de vrai dans la vraie `data/scanner.db`** (confirmé par `git status` +
+  `git diff --stat`, taille inchangée mais contenu modifié) — les tests de
+  `envoyer_alerte` qui atteignent le chemin de succès ne mockaient que
+  `envoyer_telegram`, jamais `storage`. Fichier restauré immédiatement
+  (`git checkout -- data/scanner.db`). Corrigé à deux niveaux : (1)
+  `@patch("alerting.enregistrer_alerte")` ajouté à tous les tests du chemin
+  de succès dans `tests/test_alerting.py` ; (2) nouveau `tests/conftest.py`
+  (2 fixtures `autouse`, pas seulement le filet réseau du plan initial) :
+  `_isoler_scanner_db` redirige `storage.DB_FILE` vers un `tmp_path` par
+  défaut pour **tout** test (un test qui a besoin de sa propre base la
+  re-monkeypatch explicitement, ce qui prime), et `_bloquer_reseau_reel`
+  bloque `requests.sessions.Session.request` (lève `AssertionError`
+  explicite) en filet ultime. Le premier fixture est une réponse directe à
+  l'incident constaté, ajouté au-delà du plan initialement présenté.
+- **Piège confirmé par l'implémentation (prédit par le pressure-test, via
+  un mécanisme différent)** : une fois `envoyer_digest` câblé
+  inconditionnellement en fin de `main()`, les 5 tests `main()` déjà
+  existants (qui ne configurent jamais `fournisseur.resume.return_value`,
+  donc reçoivent un `MagicMock` non configuré) faisaient réellement planter
+  `digest_necessaire` (`TypeError: '>' not supported between instances of
+  'MagicMock' and 'float'` sur `resume.appels_zero_offres /
+  resume.appels_reussis > SEUIL_TAUX_ZERO_OFFRES` — pas le
+  `bool(MagicMock().suspendu) is True` initialement anticipé, mais la même
+  conclusion) — erreur silencieusement avalée par le `try/except` de
+  `main()` autour de l'envoi du digest, les tests passaient donc pour la
+  mauvaise raison. Confirmé en isolant un test avec `--log-cli-level=ERROR`
+  avant correctif. Corrigé en ajoutant `@patch("scanner.envoyer_digest")`
+  aux 5 tests. Le test `test_main_logge_la_classification_z_score_sans_alerter`
+  (renommé `..._z_score`) avait une 2e fuite indépendante (sa prémisse
+  "aucune alerte câblée" devenait fausse) : gagné `scanner.obtenir_derniere_alerte`
+  et `scanner.envoyer_alerte` mockés pour rester hermétique, sans changer
+  son assertion d'origine (la ligne de log).
+- **Tests** : 232 au total (204 → 211 alerting.py : persistance sur succès
+  avec bons kwargs, non-persistance sur échec Telegram explicite demandé
+  par l'utilisateur, non-persistance sur suppression cooldown, 5 tests
+  digest `budget_corroboration_epuise` ; 211 → 232 scanner.py : 1 test de
+  contenu `envoyer_digest` (pas juste "un digest part"), 3 tests
+  `_route_avec_date_depart`, 10 tests unitaires `sonder_corroboration`
+  (budget 0/1/2/3/large, exception signal 1 vs signal 2, 0-offre vs
+  exception, devise différente, translation des dates), 7 tests end-to-end
+  sur **vraie base SQLite temporaire peuplée** (`storage.DB_FILE`
+  monkeypatché, seule la frontière réseau `alerting.envoyer_telegram`
+  mockée) avec l'échantillon déjà vérifié par calcul dans
+  `tests/test_detection.py` (médiane 47000/MAD 3000 cents) : les 3 types
+  d'alerte indépendants déclenchés et persistés par un seul prix (350 $ :
+  sous `prix_max=360`, sous le minimum historique à 3 %, `bonne_affaire`
+  par z-score) ; cooldown vérifié sur un 2e run rapproché (aucun renvoi) ;
+  corroboration désactivée → downgrade sans requête supplémentaire ;
+  corroboration confirmée (signaux 1+2) → `erreur_prix` persisté ;
+  budget=1 insuffisant → downgrade (signal 1 seul ne confirme jamais,
+  cf. `corroborer_erreur_prix`) ; budget partagé entre 2 routes du même run
+  (`budget_corroboration_epuise` bien transmis au digest) ; **Telegram
+  échoue → aucune alerte persistée** (le test explicite demandé), vérifié
+  de bout en bout avec le vrai pipeline `classifier → envoyer_alerte →
+  storage`, pas seulement au niveau unitaire d'`alerting.py`.
+- **Run réel de vérification** (décision explicite de l'utilisateur parmi 3
+  options proposées, celle-ci recommandée) : `python scanner.py` contre les
+  vraies API Duffel/Telegram et la vraie `data/scanner.db`. 38 appels (37
+  destinations + canari), 0 % de réponses 0-offre. CDG atteint `n=8` pour
+  la première fois (`normal`, pas d'outlier) ; toutes les autres routes
+  encore à `n=7` (`donnees_insuffisantes`) — cohérent avec la prédiction
+  Session A que ce chemin reste muet pendant des semaines. **Zéro alerte
+  envoyée**, vérifié directement dans la table `alertes` (`SELECT ...
+  WHERE envoyee_le >= '2026-07-18'` → 0 ligne), pas seulement déduit des
+  logs. 37 nouvelles observations persistées (297 au total). Avertissements
+  devise MAD/CUN inchangés (pas une régression). `data/scanner.db` modifié
+  par ce run réel — laissé non commité cette session, décision de
+  l'utilisateur à recueillir séparément (mélanger données réelles et code
+  dans les mêmes commits n'a pas été supposé).
+- Vérifié : `ruff check .`, `ruff format --check .`, `mypy` et `pytest -q`
+  tous verts (232 tests) sur l'ensemble du dépôt.
   contourné via `python -m pytest`, qui utilise le bon interpréteur ;
   `ruff`/`mypy` ne sont pas affectés.
