@@ -48,7 +48,7 @@ from detection import (
     statistiques_destination,
 )
 from providers.base import FournisseurVols, Offre
-from providers.duffel import FournisseurDuffel
+from providers.duffel import FournisseurDuffel, environnement_duffel
 from storage import (
     enregistrer_observation,
     horizon_jours,
@@ -265,6 +265,17 @@ def main() -> int:
         logger.error("Configuration invalide : %s", e)
         return 1
 
+    environnement = environnement_duffel(env.duffel_access_token)
+    if environnement == "production":
+        logger.info("environnement Duffel detecte : production")
+    else:
+        logger.warning(
+            "environnement Duffel detecte : %s - les observations de ce run seront "
+            "enregistrees mais exclues du moteur de detection (audit data/scanner.db, "
+            "Journal AUDIT.md)",
+            environnement,
+        )
+
     fournisseur = FournisseurDuffel(env, config)
     fournisseur.verifier_canari()
     historique = lire_historique()
@@ -305,6 +316,7 @@ def main() -> int:
             devise=offre.devise,
             compagnie=offre.compagnie,
             escales=offre.escales,
+            environnement=environnement,
         )
 
         maintenant = datetime.fromisoformat(horodatage)

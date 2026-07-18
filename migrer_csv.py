@@ -52,6 +52,11 @@ def migrer() -> int:
                 devise=ligne["devise"],
                 compagnie=ligne.get("compagnie") or None,
                 escales=int(ligne["escales"]) if ligne.get("escales") else None,
+                # Le CSV source ne trace pas le token Duffel a l'origine de chaque
+                # ligne : 'inconnu' (jamais 'production' par reflexe, cf. audit
+                # data/scanner.db) - ces lignes restent donc hors du moteur de
+                # detection (storage.lire_historique/lire_observations).
+                environnement="inconnu",
             )
         conn.commit()
     except Exception:

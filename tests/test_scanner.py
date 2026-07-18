@@ -265,6 +265,117 @@ def test_erreur_api_est_loggee_en_error(
     assert "ERROR" in caplog.text
 
 
+# ---------------------------------------------------------------- environnement Duffel (audit data/scanner.db)
+
+
+@patch("scanner.envoyer_digest")
+@patch("scanner.ecrire_resume_github")
+@patch("scanner.enregistrer_observation", return_value=1)
+@patch("scanner.statistiques_destination", return_value=None)
+@patch("scanner.generer_candidats")
+@patch("scanner.lire_observations", return_value=[])
+@patch("scanner.lire_historique", return_value=[])
+@patch("scanner.FournisseurDuffel")
+@patch("scanner.charger_config")
+@patch("scanner.charger_env")
+def test_main_logge_avertissement_si_token_sandbox(
+    charger_env_mock,
+    charger_config_mock,
+    fournisseur_classe_mock,
+    lire_historique_mock,
+    lire_observations_mock,
+    generer_candidats_mock,
+    stats_mock,
+    enregistrer_observation_mock,
+    resume_mock,
+    envoyer_digest_mock,
+    caplog,
+) -> None:
+    charger_env_mock.return_value.duffel_access_token = "duffel_test_abc123"
+    charger_config_mock.return_value = _config_minimal(1)
+    generer_candidats_mock.return_value = [
+        {"origine": "YUL", "destination": "AAA", "date_depart": "2026-01-01"}
+    ]
+    fournisseur_classe_mock.return_value.meilleure_offre.return_value = _offre_sans_alerte()
+
+    with caplog.at_level(logging.WARNING, logger="scanner"):
+        scanner.main()
+
+    assert "sandbox" in caplog.text
+    assert "WARNING" in caplog.text
+
+
+@patch("scanner.envoyer_digest")
+@patch("scanner.ecrire_resume_github")
+@patch("scanner.enregistrer_observation", return_value=1)
+@patch("scanner.statistiques_destination", return_value=None)
+@patch("scanner.generer_candidats")
+@patch("scanner.lire_observations", return_value=[])
+@patch("scanner.lire_historique", return_value=[])
+@patch("scanner.FournisseurDuffel")
+@patch("scanner.charger_config")
+@patch("scanner.charger_env")
+def test_main_pas_davertissement_si_token_production(
+    charger_env_mock,
+    charger_config_mock,
+    fournisseur_classe_mock,
+    lire_historique_mock,
+    lire_observations_mock,
+    generer_candidats_mock,
+    stats_mock,
+    enregistrer_observation_mock,
+    resume_mock,
+    envoyer_digest_mock,
+    caplog,
+) -> None:
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_abc123"
+    charger_config_mock.return_value = _config_minimal(1)
+    generer_candidats_mock.return_value = [
+        {"origine": "YUL", "destination": "AAA", "date_depart": "2026-01-01"}
+    ]
+    fournisseur_classe_mock.return_value.meilleure_offre.return_value = _offre_sans_alerte()
+
+    with caplog.at_level(logging.INFO, logger="scanner"):
+        scanner.main()
+
+    assert "environnement Duffel detecte : production" in caplog.text
+    assert "WARNING" not in caplog.text
+
+
+@patch("scanner.envoyer_digest")
+@patch("scanner.ecrire_resume_github")
+@patch("scanner.statistiques_destination", return_value=None)
+@patch("scanner.generer_candidats")
+@patch("scanner.lire_observations", return_value=[])
+@patch("scanner.lire_historique", return_value=[])
+@patch("scanner.FournisseurDuffel")
+@patch("scanner.charger_config")
+@patch("scanner.charger_env")
+@patch("scanner.enregistrer_observation", return_value=1)
+def test_main_transmet_environnement_a_enregistrer_observation(
+    enregistrer_observation_mock,
+    charger_env_mock,
+    charger_config_mock,
+    fournisseur_classe_mock,
+    lire_historique_mock,
+    lire_observations_mock,
+    generer_candidats_mock,
+    stats_mock,
+    ecrire_resume_mock,
+    envoyer_digest_mock,
+) -> None:
+    charger_env_mock.return_value.duffel_access_token = "duffel_test_abc123"
+    charger_config_mock.return_value = _config_minimal(1)
+    generer_candidats_mock.return_value = [
+        {"origine": "YUL", "destination": "AAA", "date_depart": "2026-01-01"}
+    ]
+    fournisseur_classe_mock.return_value.meilleure_offre.return_value = _offre_sans_alerte()
+
+    scanner.main()
+
+    assert enregistrer_observation_mock.call_args.kwargs["environnement"] == "sandbox"
+
+
 # ---------------------------------------------------------------- classification z-score (Session A/B)
 
 
@@ -546,6 +657,7 @@ def _peupler_echantillon(
             devise=devise,
             compagnie="Test Air",
             escales=0,
+            environnement="production",
         )
     return route_id
 
@@ -592,6 +704,7 @@ def test_e2e_trois_types_alerte_independants_envoyes_et_persistes(
     independamment - preuve de bout en bout des 3 messages independants avec
     leur propre dedup (AUDIT.md, Journal Session A/B)."""
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     route_id = _peupler_echantillon("YUL", "CDG", "2026-01-01")
 
     charger_config_mock.return_value = _config_e2e()
@@ -624,6 +737,7 @@ def test_e2e_deuxieme_run_rapproche_meme_prix_ne_realerte_pas(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     _peupler_echantillon("YUL", "CDG", "2026-01-01")
 
     charger_config_mock.return_value = _config_e2e()
@@ -655,6 +769,7 @@ def test_e2e_candidat_erreur_prix_corroboration_desactivee_downgrade_aubaine(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     route_id = _peupler_echantillon("YUL", "CDG", "2026-01-01")
 
     charger_config_mock.return_value = _config_e2e(corroboration_activee=False)
@@ -689,6 +804,7 @@ def test_e2e_candidat_erreur_prix_corroboration_activee_confirmee_bonus(
     """Budget large, signaux 1 et 2 tous confirmants (memes valeurs que
     tests/test_detection.py::_signaux_avec) : verdict erreur_prix persiste."""
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     monkeypatch.setattr(scanner.time, "sleep", lambda *_: None)
     route_id = _peupler_echantillon("YUL", "CDG", "2026-01-01")
 
@@ -732,6 +848,7 @@ def test_e2e_corroboration_activee_budget_insuffisant_downgrade_aubaine(
     budget) - or signal_1 seul ne confirme jamais (AUDIT.md 2.3c), le
     verdict retrograde donc systematiquement en aubaine."""
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     monkeypatch.setattr(scanner.time, "sleep", lambda *_: None)
     route_id = _peupler_echantillon("YUL", "CDG", "2026-01-01")
 
@@ -772,6 +889,7 @@ def test_e2e_budget_corroboration_partage_entre_routes_et_signale_au_digest(
     signale (WARNING + budget_corroboration_epuise transmis au digest),
     AUDIT.md Session B (ajustement utilisateur)."""
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     monkeypatch.setattr(scanner.time, "sleep", lambda *_: None)
     route_id_cdg = _peupler_echantillon("YUL", "CDG", "2026-01-01")
     route_id_lhr = _peupler_echantillon("YUL", "LHR", "2026-01-01")
@@ -822,6 +940,7 @@ def test_e2e_telegram_echoue_aucune_alerte_persistee(
     Telegram echoue, rien n'est ecrit dans la table alertes - sinon le
     cooldown de 72h supprimerait une alerte legitime jamais recue."""
     monkeypatch.setattr(storage, "DB_FILE", tmp_path / "scanner.db")
+    charger_env_mock.return_value.duffel_access_token = "duffel_live_test_e2e"
     route_id = _peupler_echantillon("YUL", "CDG", "2026-01-01")
 
     charger_config_mock.return_value = _config_e2e()

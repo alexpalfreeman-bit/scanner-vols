@@ -101,6 +101,27 @@ def test_migrer_calcule_horizon_jours_pour_chaque_ligne(tmp_path, monkeypatch) -
     assert horizons == [151, 151, 118]
 
 
+def test_migrer_tague_environnement_inconnu_et_exclu_du_lire_historique(
+    tmp_path, monkeypatch
+) -> None:
+    """Le CSV source ne trace pas le token Duffel d'origine (audit
+    data/scanner.db, Journal) : les lignes migrees sont taguees 'inconnu',
+    jamais 'production' par reflexe, et restent donc hors du moteur de
+    detection (lire_historique ne renvoie que 'production')."""
+    _preparer(tmp_path, monkeypatch)
+    migrer_csv.migrer()
+
+    conn = storage.obtenir_connexion()
+    try:
+        environnements = {
+            row["environnement"] for row in conn.execute("SELECT environnement FROM observations")
+        }
+    finally:
+        conn.close()
+    assert environnements == {"inconnu"}
+    assert storage.lire_historique() == []
+
+
 def test_migrer_refuse_si_deja_des_observations(tmp_path, monkeypatch) -> None:
     _preparer(tmp_path, monkeypatch)
     assert migrer_csv.migrer() == 0

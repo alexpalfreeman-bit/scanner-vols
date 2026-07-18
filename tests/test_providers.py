@@ -23,6 +23,33 @@ def test_import_duffel() -> None:
     import providers.duffel  # noqa: F401
 
 
+# ---------------------------------------------------------------- environnement_duffel (audit data/scanner.db)
+
+
+def test_environnement_duffel_token_live_est_production() -> None:
+    assert duffel.environnement_duffel("duffel_live_abc123") == "production"
+
+
+def test_environnement_duffel_token_test_est_sandbox() -> None:
+    assert duffel.environnement_duffel("duffel_test_abc123") == "sandbox"
+
+
+def test_environnement_duffel_prefixe_inconnu_est_inconnu() -> None:
+    assert duffel.environnement_duffel("abc123") == "inconnu"
+
+
+def test_environnement_duffel_chaine_vide_est_inconnu() -> None:
+    assert duffel.environnement_duffel("") == "inconnu"
+
+
+def test_environnement_duffel_jamais_production_par_defaut() -> None:
+    """Le seul chemin vers 'production' est un prefixe duffel_live_ explicite -
+    verifie qu'un prefixe presque correct (typo, casse differente) ne bascule
+    jamais en 'production' par erreur."""
+    assert duffel.environnement_duffel("duffel_LIVE_abc123") != "production"
+    assert duffel.environnement_duffel("duffel_liv_abc123") != "production"
+
+
 # ---------------------------------------------------------------- post_resilient (1.4)
 
 
