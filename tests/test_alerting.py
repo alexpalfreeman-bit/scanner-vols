@@ -228,16 +228,20 @@ def _parametres_envoyer_alerte(**overrides: object) -> dict:
     return base
 
 
+@patch("alerting.enregistrer_alerte")
 @patch("alerting.envoyer_telegram")
-def test_envoyer_alerte_aucune_alerte_precedente_envoie(telegram_mock) -> None:
+def test_envoyer_alerte_aucune_alerte_precedente_envoie(telegram_mock, enregistrer_mock) -> None:
     resultat = alerting.envoyer_alerte(**_parametres_envoyer_alerte(alerte_precedente=None))
 
     assert resultat is True
     telegram_mock.assert_called_once()
 
 
+@patch("alerting.enregistrer_alerte")
 @patch("alerting.envoyer_telegram")
-def test_envoyer_alerte_dans_cooldown_prix_pas_assez_bas_supprime(telegram_mock) -> None:
+def test_envoyer_alerte_dans_cooldown_prix_pas_assez_bas_supprime(
+    telegram_mock, enregistrer_mock
+) -> None:
     precedente = _alerte_precedente(prix_cents=50_000)  # envoyee il y a 48h < cooldown 72h
 
     resultat = alerting.envoyer_alerte(
@@ -246,10 +250,14 @@ def test_envoyer_alerte_dans_cooldown_prix_pas_assez_bas_supprime(telegram_mock)
 
     assert resultat is False
     telegram_mock.assert_not_called()
+    enregistrer_mock.assert_not_called()
 
 
+@patch("alerting.enregistrer_alerte")
 @patch("alerting.envoyer_telegram")
-def test_envoyer_alerte_dans_cooldown_prix_nettement_plus_bas_envoie(telegram_mock) -> None:
+def test_envoyer_alerte_dans_cooldown_prix_nettement_plus_bas_envoie(
+    telegram_mock, enregistrer_mock
+) -> None:
     precedente = _alerte_precedente(prix_cents=50_000)
 
     resultat = alerting.envoyer_alerte(
@@ -260,9 +268,12 @@ def test_envoyer_alerte_dans_cooldown_prix_nettement_plus_bas_envoie(telegram_mo
     telegram_mock.assert_called_once()
 
 
+@patch("alerting.enregistrer_alerte")
 @patch("alerting.envoyer_telegram")
 @patch("alerting.doit_alerter")
-def test_envoyer_alerte_derive_date_depart_depuis_route(doit_alerter_mock, telegram_mock) -> None:
+def test_envoyer_alerte_derive_date_depart_depuis_route(
+    doit_alerter_mock, telegram_mock, enregistrer_mock
+) -> None:
     doit_alerter_mock.return_value = True
     route = _route(date_depart="2026-11-20")
 
@@ -276,22 +287,64 @@ def test_envoyer_alerte_propage_exception_horloge_naive() -> None:
         alerting.envoyer_alerte(**_parametres_envoyer_alerte(maintenant=datetime(2026, 7, 3)))
 
 
+@patch("alerting.enregistrer_alerte")
 @patch("alerting.envoyer_telegram")
-def test_envoyer_alerte_propage_exception_telegram(telegram_mock) -> None:
+def test_envoyer_alerte_propage_exception_telegram(telegram_mock, enregistrer_mock) -> None:
     telegram_mock.side_effect = RuntimeError("boom")
 
     with pytest.raises(RuntimeError):
         alerting.envoyer_alerte(**_parametres_envoyer_alerte())
 
 
+# ---- persistance conditionnelle a un envoi Telegram confirme reussi (Session B) ----
+
+
+@patch("alerting.enregistrer_alerte")
 @patch("alerting.envoyer_telegram")
-def test_envoyer_alerte_log_info_quand_supprimee(telegram_mock, caplog) -> None:
+def test_envoyer_alerte_echec_telegram_n_enregistre_rien(telegram_mock, enregistrer_mock) -> None:
+    """Le cas explicitement demande : si envoyer_telegram echoue, enregistrer_alerte
+    ne doit JAMAIS etre appelee - sinon le cooldown de 72h supprimerait une
+    alerte legitime jamais recue."""
+    telegram_mock.side_effect = RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        alerting.envoyer_alerte(**_parametres_envoyer_alerte())
+
+    enregistrer_mock.assert_not_called()
+
+
+@patch("alerting.enregistrer_alerte")
+@patch("alerting.envoyer_telegram")
+def test_envoyer_alerte_succes_enregistre_avec_les_bons_kwargs(
+    telegram_mock, enregistrer_mock
+) -> None:
+    resultat = alerting.envoyer_alerte(
+        **_parametres_envoyer_alerte(
+            alerte_precedente=None, route_id=7, type_alerte="minimum", prix_cents=39_900
+        )
+    )
+
+    assert resultat is True
+    enregistrer_mock.assert_called_once_with(
+        route_id=7,
+        date_depart="2026-09-01",
+        type_alerte="minimum",
+        prix_cents=39_900,
+        envoyee_le="2026-07-03T00:00:00+00:00",
+    )
+
+
+@patch("alerting.enregistrer_alerte")
+@patch("alerting.envoyer_telegram")
+def test_envoyer_alerte_log_info_quand_supprimee(telegram_mock, enregistrer_mock, caplog) -> None:
     precedente = _alerte_precedente(prix_cents=50_000)
 
     with caplog.at_level(logging.INFO, logger="alerting"):
         alerting.envoyer_alerte(
             **_parametres_envoyer_alerte(alerte_precedente=precedente, prix_cents=48_000)
         )
+
+    enregistrer_mock.assert_not_called()
 
     assert "alerte supprimee" in caplog.text
 
@@ -365,6 +418,18 @@ def test_digest_necessaire_appels_reussis_zero_pas_de_crash() -> None:
 
 def test_digest_necessaire_entrees_vides() -> None:
     assert alerting.digest_necessaire([], []) is False
+
+
+def test_digest_necessaire_budget_corroboration_epuise() -> None:
+    """Atteindre le plafond de corroboration est une anomalie en soi (AUDIT.md
+    Session B) : declenche le digest meme sans route en erreur ni fournisseur
+    suspendu/anormal."""
+    assert alerting.digest_necessaire([], [], budget_corroboration_epuise=True) is True
+
+
+def test_digest_necessaire_budget_corroboration_non_epuise_par_defaut() -> None:
+    resultats = [("YUL→CDG (2026-09-01)", "ok : 500 USD")]
+    assert alerting.digest_necessaire(resultats, []) is False
 
 
 # --- formater_digest
@@ -454,6 +519,18 @@ def test_formater_digest_entrees_vides_pas_de_crash() -> None:
     assert "0/0 routes OK, 0 en erreur" in message
 
 
+def test_formater_digest_mentionne_budget_corroboration_epuise() -> None:
+    message = alerting.formater_digest([], [], budget_corroboration_epuise=True)
+
+    assert "Budget de corroboration épuisé" in message
+
+
+def test_formater_digest_omet_avertissement_corroboration_si_non_epuise() -> None:
+    message = alerting.formater_digest([], [], budget_corroboration_epuise=False)
+
+    assert "corroboration" not in message.lower()
+
+
 # --- envoyer_digest
 
 
@@ -475,3 +552,17 @@ def test_envoyer_digest_non_necessaire_ne_envoie_pas_et_retourne_false(telegram_
 
     assert resultat is False
     telegram_mock.assert_not_called()
+
+
+@patch("alerting.envoyer_telegram")
+def test_envoyer_digest_budget_corroboration_epuise_force_envoi(telegram_mock) -> None:
+    """Un run par ailleurs sain (aucune route en erreur, aucun fournisseur
+    anormal) doit quand meme produire un digest si le budget de corroboration
+    a ete epuise pendant le run."""
+    resultats = [("YUL→CDG (2026-09-01)", "ok : 500 USD")]
+
+    resultat = alerting.envoyer_digest(resultats, [], _env(), budget_corroboration_epuise=True)
+
+    assert resultat is True
+    message_envoye = telegram_mock.call_args.args[0]
+    assert "Budget de corroboration épuisé" in message_envoye

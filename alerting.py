@@ -16,6 +16,7 @@ import requests
 from config import Env
 from detection import TypeAlerte, doit_alerter
 from providers.base import ResumeFournisseur
+from storage import enregistrer_alerte
 
 logger = logging.getLogger(__name__)
 
@@ -138,13 +139,19 @@ def envoyer_alerte(
 ) -> bool:
     """Envoie l'alerte seulement si detection.doit_alerter l'autorise (dedup/
     cooldown, AUDIT.md 2.3d) : compose la decision (doit_alerter), le
-    formatage (formater_alerte) et l'envoi (envoyer_telegram). Retourne True
-    si un message a ete envoye, False s'il a ete supprime par le cooldown.
+    formatage (formater_alerte), l'envoi (envoyer_telegram) et la
+    persistance (storage.enregistrer_alerte). Retourne True si un message a
+    ete envoye, False s'il a ete supprime par le cooldown.
 
-    Ne catch aucune exception (ValueError de doit_alerter sur horloge naive,
-    erreurs reseau/HTTP de envoyer_telegram) : les laisse remonter, comme
-    aujourd'hui scanner.py gere deja ses propres try/except autour de
-    l'envoi - cette politique reste dans scanner.py, pas dupliquee ici.
+    La persistance n'a lieu qu'apres un envoi confirme reussi : l'appel a
+    enregistrer_alerte suit directement envoyer_telegram, sans try/except
+    entre les deux. Si envoyer_telegram leve (echec definitif), enregistrer_alerte
+    n'est jamais atteint - sinon le cooldown de 72h supprimerait une alerte
+    legitime jamais recue. Ne catch aucune exception (ValueError de
+    doit_alerter sur horloge naive, erreurs reseau/HTTP de envoyer_telegram) :
+    les laisse remonter, comme aujourd'hui scanner.py gere deja ses propres
+    try/except autour de l'envoi - cette politique reste dans scanner.py, pas
+    dupliquee ici.
 
     prix_cents doit correspondre a vol["prix"] en centimes entiers ; comme
     alerte_precedente dans doit_alerter, ce n'est pas revalide ici (parametre
@@ -153,9 +160,8 @@ def envoyer_alerte(
     route["date_depart"] pour eviter une 3e source de verite sur la meme
     donnee.
 
-    Pas encore appelee par scanner.py (cablage : session suivante) - testee
-    ici uniquement avec des fixtures synthetiques, comme detection.doit_alerter
-    lui-meme en Phase 2.3."""
+    Cablee dans scanner.py (cablage go-live, Session B) : le route_id/prix_cents/
+    type_alerte recus ici sont aussi ceux utilises pour la cle de persistance."""
     date_depart = route["date_depart"]
     if not doit_alerter(
         route_id=route_id,
@@ -175,6 +181,13 @@ def envoyer_alerte(
         )
         return False
     envoyer_telegram(formater_alerte(route, vol, raisons, stats), env)
+    enregistrer_alerte(
+        route_id=route_id,
+        date_depart=date_depart,
+        type_alerte=type_alerte,
+        prix_cents=prix_cents,
+        envoyee_le=maintenant.isoformat(timespec="seconds"),
+    )
     return True
 
 
@@ -206,16 +219,24 @@ def _est_echec(resultat: str) -> bool:
 
 
 def digest_necessaire(
-    resultats: Sequence[tuple[str, str]], resumes: Sequence[ResumeFournisseur]
+    resultats: Sequence[tuple[str, str]],
+    resumes: Sequence[ResumeFournisseur],
+    *,
+    budget_corroboration_epuise: bool = False,
 ) -> bool:
     """True si au moins une route a echoue (_est_echec), OU au moins un
     fournisseur est suspendu, OU le taux de reponses 0-offre d'un
-    fournisseur est anormal. Ce dernier cas n'est pas une extrapolation :
-    AUDIT.md 2.4 dit explicitement qu'un taux anormal doit produire "un
-    avertissement dans le digest technique", et le Journal Phase 2.4 decrit
-    le log GitHub Actions comme "seul filet de securite reel en l'absence du
-    digest" - ce digest doit devenir ce filet, pas seulement afficher le
-    taux quand il se declenche deja pour une autre raison."""
+    fournisseur est anormal, OU le budget de corroboration a ete epuise
+    pendant le run (AUDIT.md Session B : atteindre ce plafond est une
+    anomalie en soi, pas seulement un detail de cout). Ce dernier cas n'est
+    pas une extrapolation : AUDIT.md 2.4 dit explicitement qu'un taux
+    anormal doit produire "un avertissement dans le digest technique", et le
+    Journal Phase 2.4 decrit le log GitHub Actions comme "seul filet de
+    securite reel en l'absence du digest" - ce digest doit devenir ce filet,
+    pas seulement afficher le taux quand il se declenche deja pour une autre
+    raison."""
+    if budget_corroboration_epuise:
+        return True
     if any(_est_echec(resultat) for _, resultat in resultats):
         return True
     for resume in resumes:
@@ -244,17 +265,21 @@ def _ligne_fournisseur(resume: ResumeFournisseur) -> str:
 
 
 def formater_digest(
-    resultats: Sequence[tuple[str, str]], resumes: Sequence[ResumeFournisseur]
+    resultats: Sequence[tuple[str, str]],
+    resumes: Sequence[ResumeFournisseur],
+    *,
+    budget_corroboration_epuise: bool = False,
 ) -> str:
     """Message technique HTML (parse_mode=HTML) : compte de routes OK/en
     erreur, liste des routes en erreur (plafonnee a MAX_ROUTES_ERREUR_AFFICHEES,
     chaque detail echappe PUIS tronque a MAX_LONGUEUR_DETAIL_ERREUR - dans cet
     ordre, pour que la longueur affichee reste bornee meme si l'echappement
     allonge le texte, ex. "<" -> "&lt;" ; un detail peut contenir du HTML brut
-    venant de extraire_message_erreur sur un 502, ex. r.text[:200]), puis une
-    ligne par fournisseur. Fonction pure : aucune lecture d'horloge, pas de
-    timestamp absolu dans le message (Telegram horodate deja les messages
-    recus)."""
+    venant de extraire_message_erreur sur un 502, ex. r.text[:200]), une
+    ligne par fournisseur, puis un avertissement si le budget de corroboration
+    a ete epuise pendant le run (AUDIT.md Session B). Fonction pure : aucune
+    lecture d'horloge, pas de timestamp absolu dans le message (Telegram
+    horodate deja les messages recus)."""
     erreurs = [(nom, detail) for nom, detail in resultats if _est_echec(detail)]
     total = len(resultats)
     n_erreurs = len(erreurs)
@@ -279,17 +304,32 @@ def formater_digest(
         lignes.append("🔌 Fournisseurs :")
         lignes.extend(_ligne_fournisseur(resume) for resume in resumes)
 
+    if budget_corroboration_epuise:
+        lignes.append("")
+        lignes.append("⚠️ Budget de corroboration épuisé pendant ce run (plafond atteint)")
+
     return "\n".join(lignes)
 
 
 def envoyer_digest(
-    resultats: Sequence[tuple[str, str]], resumes: Sequence[ResumeFournisseur], env: Env
+    resultats: Sequence[tuple[str, str]],
+    resumes: Sequence[ResumeFournisseur],
+    env: Env,
+    *,
+    budget_corroboration_epuise: bool = False,
 ) -> bool:
     """Envoie le digest technique seulement si digest_necessaire (AUDIT.md
-    2.5) : cf. son docstring pour les 3 conditions de declenchement. Retourne
-    True si un message a ete envoye. Pas encore appelee par scanner.py
-    (cablage : session suivante)."""
-    if not digest_necessaire(resultats, resumes):
+    2.5) : cf. son docstring pour les conditions de declenchement. Retourne
+    True si un message a ete envoye. Cablee dans scanner.py (cablage
+    go-live, Session B)."""
+    if not digest_necessaire(
+        resultats, resumes, budget_corroboration_epuise=budget_corroboration_epuise
+    ):
         return False
-    envoyer_telegram(formater_digest(resultats, resumes), env)
+    envoyer_telegram(
+        formater_digest(
+            resultats, resumes, budget_corroboration_epuise=budget_corroboration_epuise
+        ),
+        env,
+    )
     return True
